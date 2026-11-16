@@ -203,3 +203,95 @@ jobs:
 
       - name: Run tests (hw-decode)
         run: cargo test --package cordiale-ui --features hw-decode media_
+
+  # Windows x64 links FFmpeg statically from vcpkg, the same way as the release
+  # package, so a missing system library (the Media Foundation GUID libraries
+  # `mfuuid` and `strmiids`) fails here and not at the release tag. Windows
+  # ARM64 shares the same link libraries and is covered by the release build.
+  # The vcpkg build of FFmpeg is slow: its binary archives are cached, and a
+  # cache miss only costs time. This job is not a required check.
+  hw-decode-windows:
+    name: hw-decode (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      VCPKGRS_TRIPLET: x64-windows-static-md
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      # The runner image version is not in the `env` context, so the key uses
+      # the hash of this file. A new key restores the archives of the previous
+      # one through `restore-keys`.
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: vcpkg-ffmpeg-${{ runner.os }}-x64-windows-static-md-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            vcpkg-ffmpeg-${{ runner.os }}-x64-windows-static-md-
+
+      - name: Install FFmpeg with vcpkg
+        shell: pwsh
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}\vcpkg-archives
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "ffmpeg:x64-windows-static-md"
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg install failed with exit code $LASTEXITCODE"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT"
+
+      # This step links the static FFmpeg: it is the point of the job.
+      - name: Build binary (hw-decode)
+        shell: pwsh
+        run: |
+          cargo build --package cordiale-ui --features hw-decode
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Lint with Clippy (hw-decode)
+        run: cargo clippy --package cordiale-ui --all-targets --features hw-decode -- -D warnings
+
+      - name: Run tests (hw-decode)
+        run: cargo test --package cordiale-ui --features hw-decode media_
+
+  # Same check on macOS against Homebrew's FFmpeg. Its runners are slower than
+  # Linux's, so this job is not a required check.
+  hw-decode-macos:
+    name: hw-decode (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install FFmpeg with Homebrew
+        shell: bash
+        run: brew install ffmpeg pkg-config
+
+      - name: Lint with Clippy (hw-decode)
+        run: cargo clippy --package cordiale-ui --all-targets --features hw-decode -- -D warnings
+
+      - name: Run tests (hw-decode)
+        run: cargo test --package cordiale-ui --features hw-decode media_

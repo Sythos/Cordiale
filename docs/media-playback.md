@@ -53,9 +53,11 @@ zero indica un vuoto nel suono.
   D3D11VA e DXVA2 su Windows, VideoToolbox su macOS. Funziona per H.264, HEVC,
   VP9 e AV1; VP8 resta in software.
 - È spenta di default, come `video-shrink`: una build che la vuole deve avere
-  le librerie di sviluppo di FFmpeg. Il job CI `hw-decode` la compila e la
-  prova su Linux. Tra i pacchetti di rilascio la includono Windows (x64 e
-  ARM64) e macOS; i pacchetti Linux no (sezione «Pacchetti di rilascio»).
+  le librerie di sviluppo di FFmpeg. I job CI `hw-decode` la compilano e la
+  provano su Linux, su Windows x64 (FFmpeg statico da vcpkg, come nel
+  pacchetto di rilascio) e su macOS (FFmpeg di Homebrew). Tra i pacchetti di
+  rilascio la includono Windows (x64 e ARM64) e macOS; i pacchetti Linux no
+  (sezione «Pacchetti di rilascio»).
 - Senza la feature, senza un decodificatore adatto nel sistema, o con
   `CORDIALE_VIDEO_DECODE=software`, il file si riproduce con i
   decodificatori software, senza errori.
@@ -133,17 +135,27 @@ collegamento che non dipende dalle librerie del sistema dell'utente. Dove FFmpeg
 
 Regole del workflow `packages.yml`:
 
-- Windows ARM64 e macOS hanno un ripiego: se l'installazione di FFmpeg o la
-  build con hardware fallisce, il job compila senza `hw-decode`, scrive un
-  avviso e il pacchetto usa il software. Windows x64 non ha ripiego: un
-  errore ferma il job.
+- Windows (x64 e ARM64) e macOS hanno un ripiego: se l'installazione di
+  FFmpeg o la build con hardware fallisce, il job compila senza `hw-decode`,
+  scrive un avviso (`::warning::`) e una riga nel riepilogo del job con il
+  nome del pacchetto, e il pacchetto usa il software. Il job resta verde: il
+  riepilogo è l'unico segnale.
+- Su Windows `avcodec.lib` ha bisogno delle librerie di sistema `mfuuid` e
+  `strmiids` (GUID di Media Foundation: `IID_IMFTransform`,
+  `IID_IMFMediaEventGenerator`, `IID_ICodecAPI`). Il percorso vcpkg di
+  `ffmpeg-sys-next` non le collega: lo fa `crates/cordiale-ui/build.rs` con la
+  feature `hw-decode`, per x64 e ARM64. Senza, il collegamento fallisce con
+  simboli esterni non risolti (la release v1.0.20 si è fermata così).
 - Ogni job di Windows controlla che l'eseguibile non importi una DLL di FFmpeg.
   Ogni job di macOS controlla con `otool -L` che non colleghi `libav*`,
   `libsw*` né un percorso di Homebrew. Il controllo fa fallire il pacchetto
   che non partirebbe senza FFmpeg.
-- Le build con vcpkg su Windows ARM64 e su macOS sono scritte ma non ancora
-  provate dalla CI: partono con la prossima release o con l'avvio manuale di
-  `Packages`. Se il ripiego scatta, l'avviso appare nel riepilogo del job.
+- La CI (job `hw-decode (windows-latest)` e `hw-decode (macos-latest)`)
+  compila e prova `hw-decode` su Windows x64 e su macOS prima di una release,
+  ma non sono controlli obbligatori. Windows ARM64 condivide le stesse
+  librerie di collegamento e le build con vcpkg su ARM64 e su macOS (statico)
+  sono provate solo dalla release o dall'avvio manuale di `Packages`. Se il
+  ripiego scatta, l'avviso appare nel riepilogo del job.
 
 Perché Linux resta in software, decisione presa: un collegamento statico di
 FFmpeg non ha un percorso hardware senza le librerie condivise di VA-API, e
@@ -168,8 +180,8 @@ release (o di un avvio manuale di `Packages`):
 
 - il pacchetto Windows x64 con `hw-decode` parte su un sistema senza FFmpeg
   (il job lo controlla sull'eseguibile: nessuna DLL di FFmpeg);
-- le build con hardware di Windows ARM64 e macOS riescono, o il ripiego
-  compila il pacchetto in software con un avviso.
+- le build con hardware di Windows (x64 e ARM64) e macOS riescono, o il
+  ripiego compila il pacchetto in software con un avviso.
 
 ## Registro dei risultati
 

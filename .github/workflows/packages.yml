@@ -122,7 +122,9 @@ jobs:
             win_arch: x64
             # Hardware video decoding (docs/media-playback.md). FFmpeg is
             # linked statically from vcpkg, so the executable needs no DLL.
+            # If the hardware build fails, the job builds without it.
             hw_decode: "true"
+            hw_fallback: "true"
             vcpkg_triplet: x64-windows-static-md
           - target: aarch64-pc-windows-msvc
             runner: windows-latest
@@ -259,7 +261,9 @@ jobs:
           (steps.win_ffmpeg.outcome == 'failure' || steps.win_hw_build.outcome == 'failure' ||
           steps.mac_ffmpeg.outcome == 'failure' || steps.mac_hw_build.outcome == 'failure')
         shell: bash
-        run: echo "::warning::The hardware decoding build failed. This package uses software decoding."
+        run: |
+          echo "::warning::The hardware decoding build failed. This package uses software decoding."
+          echo "Hardware decoding build failed for ${{ matrix.artifact }}. This package uses software decoding." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build release binary (cross, aarch64 Linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
