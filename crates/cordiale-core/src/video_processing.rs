@@ -124,8 +124,30 @@ fn fresh_output_dir() -> std::io::Result<PathBuf> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir)?;
+    // Owner-only on Unix, whatever the umask is. On Windows the temp folder
+    // of the user already has a per-user access list.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
     Ok(dir)
+}
+
+/// Creates the empty output file before the encoder opens it, so it is
+/// owner-only (Unix) before any video data is written. Fails if it exists.
+fn create_private_file(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map(drop)
 }
 
 /// Re-encodes `input` into a temporary MP4. `cancel` is checked between
@@ -153,6 +175,7 @@ pub fn shrink(
         filename,
         mime: SHRUNK_MIME,
     };
+    create_private_file(&video.path).map_err(|err| ShrinkError::Failed(err.to_string()))?;
     transcode(input, &video.path, cancel, progress)?;
     Ok(video)
 }
@@ -452,6 +475,20 @@ mod tests {
         assert_eq!(target_size(641, 481), (640, 480));
         assert_eq!(target_size(1080, 1920), (404, 720));
         assert_eq!(target_size(3840, 2160), (1280, 720));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_output_folder_and_file_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_output_dir().unwrap();
+        let file = dir.join("out.mp4");
+        create_private_file(&file).unwrap();
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
     }
 
     #[cfg(not(feature = "video-shrink"))]
