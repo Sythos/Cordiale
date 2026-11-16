@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::Local;
-use cordiale_core::diagnostics::{describe_graphics, Diagnostics};
+use cordiale_core::diagnostics::{describe_audio_output, describe_graphics, Diagnostics};
 use cordiale_core::persistence;
 use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::WinitWindowAccessor;
@@ -118,6 +118,7 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
         display_size,
         scale_factor: Some(window.scale_factor()),
         windowing_system: windowing_system.map(str::to_string),
+        audio_output: default_audio_output(),
         system_locale: sys_locale::get_locale(),
         app_language: app_language.map(str::to_string),
         keyboard_layout: keyboard_layout(),
@@ -131,6 +132,17 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
         storage_note: persistence::storage_note(),
     }
     .render()
+}
+
+/// The default output device and audio host, read from the backend the
+/// player uses. `None` when the system reports no default device.
+pub(crate) fn default_audio_output() -> Option<String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = rodio::cpal::default_host();
+    let device = host.default_output_device()?;
+    let name = device.description().ok()?.name().to_string();
+    describe_audio_output(Some(&name), Some(host.id().name()))
 }
 
 /// The OS as its own tools name it, e.g. "Windows 11 Pro" or

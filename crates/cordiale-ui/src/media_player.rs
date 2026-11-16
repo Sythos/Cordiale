@@ -167,6 +167,10 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 generation,
             }) => {
                 session = None;
+                // The sink follows the device that was the default when it
+                // opened. Open it again for each file, so a new default
+                // device (a headset, a monitor) gets the sound.
+                device = None;
                 ensure_device(&mut device);
                 match Session::open(bytes, &extension, generation, volume, device.as_ref()) {
                     Ok(opened) => {
@@ -242,7 +246,12 @@ fn ensure_device(device: &mut Option<rodio::MixerDeviceSink>) {
         return;
     }
     match crate::audio_output::open_selected_sink() {
-        Ok(sink) => *device = Some(sink),
+        Ok(sink) => {
+            *device = Some(sink);
+            cordiale_core::persistence::log_line(&audio_output_line(
+                crate::debug_info::default_audio_output().as_deref(),
+            ));
+        }
         Err(err) => cordiale_core::persistence::log_line(&format!("no audio output: {err}")),
     }
 }
@@ -336,6 +345,12 @@ impl Session {
             }
             (None, _) if video.is_none() => return Err("no audio track".to_string()),
             (Some(_), None) if video.is_none() => return Err("no audio output".to_string()),
+            (Some(_), None) => {
+                cordiale_core::persistence::log_line(
+                    "video has a sound, but no audio output is open: it plays without sound",
+                );
+                None
+            }
             _ => None,
         };
         let mut clock = WallClock {
@@ -540,6 +555,14 @@ impl VideoStats {
 struct AudioStats {
     /// Times when the output found the decoded queue empty and had to wait.
     underruns: AtomicU64,
+}
+
+/// The log line for the audio output that the player opened.
+fn audio_output_line(device: Option<&str>) -> String {
+    format!(
+        "audio output opened: {}",
+        device.unwrap_or("default device (name not available)")
+    )
 }
 
 /// The line for the log.
@@ -1177,7 +1200,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             }
             _ => None,
         })
-        .ok_or("no audio track")?;
+        .ok_or(NO_AUDIO_TRACK)?;
     let mut source = if params.codec == CODEC_ID_OPUS {
         let channels = params
             .channels
@@ -2086,6 +2109,8 @@ fn open_video(
         let total = media
             .duration_us
             .map(|us| Duration::from_micros(us.max(0) as u64));
+        let has_vorbis = media.vorbis.is_some();
+        let has_opus = media.audio.is_some();
         let vorbis = media
             .vorbis
             .and_then(|track| vorbis_source(bytes, track, total));
@@ -2110,18 +2135,67 @@ fn open_video(
             (first && source.refill()).then_some(source)
         });
         let audio = audio.or(vorbis);
+        if audio.is_none() && (has_opus || has_vorbis) {
+            cordiale_core::persistence::log_line("webm audio track could not be opened");
+        }
         return Ok((VideoPlayer::new(Arc::clone(bytes), track)?, audio));
     }
     let track = media_demux::mp4_video(bytes)?;
     let player = VideoPlayer::new(Arc::clone(bytes), track)?;
     // A file without a sound that the player decodes plays without sound.
-    let audio = symphonia_source(bytes, "mp4").ok();
+    let audio = audio_or_log(symphonia_source(bytes, "mp4"));
     Ok((player, audio))
+}
+
+/// The message `symphonia_source` gives when the file has no audio track.
+const NO_AUDIO_TRACK: &str = "no audio track";
+
+/// Whether an audio error is worth a log line: a file without an audio
+/// track is normal, any other error means a present track failed.
+fn audio_error_is_loggable(err: &str) -> bool {
+    err != NO_AUDIO_TRACK
+}
+
+/// The sound of a video, or `None`. A missing audio track stays silent in
+/// the log; a track that fails to open is logged.
+fn audio_or_log(result: Result<AudioSource, String>) -> Option<AudioSource> {
+    match result {
+        Ok(source) => Some(source),
+        Err(err) => {
+            if audio_error_is_loggable(&err) {
+                cordiale_core::persistence::log_line(&format!(
+                    "video audio track could not be opened: {err}"
+                ));
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_audio_track_is_not_logged() {
+        assert!(!audio_error_is_loggable(NO_AUDIO_TRACK));
+        assert!(audio_error_is_loggable("unsupported audio"));
+    }
+
+    #[test]
+    fn the_audio_output_line_names_the_device() {
+        assert_eq!(
+            audio_output_line(Some("Speakers (host: WASAPI)")),
+            "audio output opened: Speakers (host: WASAPI)"
+        );
+        assert!(audio_output_line(None).contains("name not available"));
+    }
+
+    #[test]
+    fn a_failed_audio_track_gives_no_source() {
+        assert!(audio_or_log(Err(NO_AUDIO_TRACK.to_string())).is_none());
+        assert!(audio_or_log(Err("unsupported audio".to_string())).is_none());
+    }
 
     fn gray(width: usize, height: usize, luma: u8) -> Planar {
         Planar {
@@ -2303,6 +2377,13 @@ mod tests {
         let samples: Vec<Sample> = source.collect();
         assert_eq!(samples.len(), 8_000);
         assert!(samples.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn an_audio_file_without_an_output_device_fails_with_a_reason() {
+        let bytes = wav_second(8_000);
+        let result = Session::open(bytes, "wav", 1, 1.0, None);
+        assert_eq!(result.err().as_deref(), Some("no audio output"));
     }
 
     #[test]

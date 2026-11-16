@@ -9655,6 +9655,26 @@ fn a_video_that_was_not_shrunk_is_reported_and_never_uploaded_as_is() {
     assert_eq!(shrink_error_status(&ShrinkError::Cancelled), None);
 }
 
+/// The seek bar track and fill must start at the left edge (x = 0) and
+/// the fill width must use the same fraction as the marker position.
+#[test]
+fn seek_bar_fill_starts_at_left_edge_with_marker_fraction() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let bar = slint
+        .split("property <float> fraction: scrub >= 0")
+        .nth(1)
+        .and_then(|rest| rest.split("TouchArea {").next())
+        .expect("seek bar block");
+    let rects: Vec<&str> = bar.split("Rectangle {").skip(1).collect();
+    assert_eq!(rects.len(), 3, "track, fill and marker");
+    for track in &rects[..2] {
+        assert!(track.contains("x: 0px;"), "track and fill start at x = 0");
+    }
+    assert!(rects[0].contains("width: parent.width;"));
+    assert!(rects[1].contains("width: parent.width * parent.fraction;"));
+    assert!(rects[2].contains("x: parent.width * parent.fraction - 6px;"));
+}
+
 /// A 507 can't say whether the instance or the subject's own cap is out
 /// of space (protocol v26), so its copy must not blame the server, in
 /// the UI or in any catalog.
@@ -16820,6 +16840,22 @@ fn radio_and_admin_settings_keep_controls_at_the_top_in_tall_windows() {
             "{section}: the top of the panel changes with the window height"
         );
     }
+}
+
+#[test]
+fn trim_outer_line_breaks_removes_only_the_end_breaks() {
+    let white = (255, 255, 255);
+    let mut runs = vec![
+        ("\n".to_string(), white, false),
+        ("one\n\ntwo".to_string(), white, false),
+        ("\n\n".to_string(), white, false),
+    ];
+    trim_outer_line_breaks(&mut runs);
+    assert_eq!(visible_body_text(&runs), "one\n\ntwo");
+
+    let mut only_breaks = vec![("\n\n".to_string(), white, false)];
+    trim_outer_line_breaks(&mut only_breaks);
+    assert!(only_breaks.is_empty());
 }
 
 #[test]

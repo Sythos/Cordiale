@@ -9930,6 +9930,7 @@ fn chat_line_from_message(
         for run in &mut runs {
             run.0 = run.0.replace("\r\n", "\n").replace('\r', "\n");
         }
+        trim_outer_line_breaks(&mut runs);
     }
     add_link_icons(&mut runs);
     let bold_mention = mention && BOLD_MENTIONS.load(std::sync::atomic::Ordering::Relaxed);
@@ -10025,6 +10026,30 @@ fn chat_line_from_message(
         encrypted: message_lock_visible(message),
         incoming,
         separator: Default::default(),
+    }
+}
+
+/// Removes the line breaks before the first and after the last visible
+/// character of a row. A break at an end of the text adds an empty line, and
+/// so a blank band, to the row. Breaks between words stay.
+fn trim_outer_line_breaks(runs: &mut Vec<(String, (u8, u8, u8), bool)>) {
+    while let Some(last) = runs.last_mut() {
+        let kept = last.0.trim_end_matches('\n').len();
+        last.0.truncate(kept);
+        if last.0.is_empty() {
+            runs.pop();
+        } else {
+            break;
+        }
+    }
+    while let Some(first) = runs.first_mut() {
+        let rest = first.0.trim_start_matches('\n').to_string();
+        first.0 = rest;
+        if first.0.is_empty() {
+            runs.remove(0);
+        } else {
+            break;
+        }
     }
 }
 
