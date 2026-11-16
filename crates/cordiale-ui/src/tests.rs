@@ -16823,6 +16823,22 @@ fn radio_and_admin_settings_keep_controls_at_the_top_in_tall_windows() {
 }
 
 #[test]
+fn trim_outer_line_breaks_removes_only_the_end_breaks() {
+    let white = (255, 255, 255);
+    let mut runs = vec![
+        ("\n".to_string(), white, false),
+        ("one\n\ntwo".to_string(), white, false),
+        ("\n\n".to_string(), white, false),
+    ];
+    trim_outer_line_breaks(&mut runs);
+    assert_eq!(visible_body_text(&runs), "one\n\ntwo");
+
+    let mut only_breaks = vec![("\n\n".to_string(), white, false)];
+    trim_outer_line_breaks(&mut only_breaks);
+    assert!(only_breaks.is_empty());
+}
+
+#[test]
 fn selectable_body_text_keeps_only_plain_single_style_rows() {
     let white = (255, 255, 255);
     let red = (255, 0, 0);
