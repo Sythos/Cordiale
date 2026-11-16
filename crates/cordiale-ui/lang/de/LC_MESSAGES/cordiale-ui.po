@@ -4224,3 +4224,10 @@ msgstr "Der laufende Ton konnte nicht auf die neue Audioausgabe wechseln. Neue W
 msgctxt "AppWindow"
 msgid "Audio output applied."
 msgstr "Audioausgabe übernommen."
+
+
+msgctxt "AppWindow"
+msgid "{n} unread message"
+msgid_plural "{n} unread messages"
+msgstr[0] "{n} ungelesene Nachricht"
+msgstr[1] "{n} ungelesene Nachrichten"
