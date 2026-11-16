@@ -1760,6 +1760,10 @@ export component AppWindow inherits Window {
     callback older-history-requested();
     // A message row of the mentions summary was clicked (its row index).
     callback mention-open-requested(int);
+    // Offline mentions left to visit in the open channel; 0 hides the badge.
+    in property <int> offline-mention-count: 0;
+    // The badge above the send arrow was clicked.
+    callback offline-mention-visit-requested();
     // The chat pane's scroll position (two-way with the pane) and height,
     // read by Rust to keep the reader's line in place while an older page
     // is prepended, and whether the pane is following the newest line.
@@ -6573,6 +6577,33 @@ export component AppWindow inherits Window {
                         height: parent.height;
                         enabled: current-query ? current-query-ready : has-selected-channel;
                         clicked => { send-chat-message(compose-text); }
+                    }
+
+                    // Round badge just above the send arrow: the offline
+                    // mentions left to visit. It floats over the chat, so
+                    // the footer layout does not change.
+                    if offline-mention-count > 0 && !current-query : Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        x: (parent.width - self.width) / 2;
+                        y: -self.height - 4px;
+                        border-radius: 12px;
+                        background: #d32f2f;
+                        accessible-role: button;
+                        accessible-label: @tr("Next mention ({})", offline-mention-count);
+                        accessible-action-default => { offline-mention-visit-requested(); }
+                        Text {
+                            text: offline-mention-count;
+                            color: white;
+                            font-size: 12px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { offline-mention-visit-requested(); }
+                        }
                     }
 
                     // Small lock at the lower-left of the icon. It has no

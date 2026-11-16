@@ -543,6 +543,8 @@ enum WorkerCommand {
     LoadOlderHistory,
     /// A row of the mentions summary was clicked (its index in the rows).
     OpenMention(usize),
+    /// The mention badge above the send arrow was clicked.
+    VisitOfflineMention,
     /// Rebuilds the open window's rows from the stored history, trimming
     /// its oldest rows first when `trim` is set. The chat pane asks for it:
     /// only the pane knows whether the reader follows the newest line, and
@@ -1343,6 +1345,9 @@ struct PanelState {
     mentions_bundles: HashMap<String, ReplyView>,
     /// Where each row of that summary leads, row for row (`None`: nowhere).
     mention_jumps: HashMap<String, Vec<Option<MentionJump>>>,
+    /// Ids of the offline mentions still to visit, per window (folded key),
+    /// in chat order. The badge above the send arrow walks them.
+    offline_mentions: HashMap<(String, String), VecDeque<i64>>,
 }
 
 struct SettingsState {
@@ -1856,6 +1861,7 @@ impl WorkerState {
                 archive: None,
                 mentions_bundles: HashMap::new(),
                 mention_jumps: HashMap::new(),
+                offline_mentions: HashMap::new(),
             },
             windows: WindowState {
                 window_states: HashMap::new(),
@@ -2879,6 +2885,9 @@ async fn run_worker(
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
                     }
+                    Some(WorkerCommand::VisitOfflineMention) => {
+                        handle_visit_offline_mention(&mut state, &ui).await;
+                    }
                     Some(WorkerCommand::OpenMention(index)) => {
                         handle_open_mention(&mut state, &ui, index).await;
                     }
@@ -3397,6 +3406,7 @@ async fn finish_connect(
             state.networks.peer_away.clear();
             state.panels.mentions_bundles.clear();
             state.panels.mention_jumps.clear();
+            state.panels.offline_mentions.clear();
             state.prefs.upload_limits = None;
             state.prefs.server_auto_away_default = None;
             cancel_video_shrinks(state);

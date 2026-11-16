@@ -11920,6 +11920,36 @@ fn mention_jumps_resolve_the_window_and_keep_the_id_optional() {
 }
 
 #[test]
+fn offline_mention_queues_order_and_count_each_message_once() {
+    let channel = |name: &str, id: Option<i64>| MentionJump {
+        window: MentionWindow::Channel(name.to_string()),
+        id,
+    };
+    let jumps = vec![
+        channel("#Rust", Some(30)),
+        MentionJump {
+            window: MentionWindow::Query("Alice".to_string()),
+            id: Some(5),
+        },
+        channel("#rust", Some(10)),
+        channel("#rust", Some(30)),
+        channel("#rust", None),
+        channel("#other", Some(20)),
+    ];
+    let queues = offline_mention_queues("libera", &jumps);
+    assert_eq!(queues.len(), 2);
+    assert_eq!(
+        queues.get(&window_state_key("libera", "#rust")),
+        Some(&VecDeque::from(vec![10, 30]))
+    );
+    assert_eq!(
+        queues.get(&window_state_key("libera", "#other")),
+        Some(&VecDeque::from(vec![20]))
+    );
+    assert!(offline_mention_queues("libera", &[]).is_empty());
+}
+
+#[test]
 fn mention_row_counts_the_date_separators_above_the_message() {
     use cordiale_core::isupport::CaseMapping;
 
