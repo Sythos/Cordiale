@@ -305,6 +305,8 @@ jobs:
       # when it unwinds an exception. The tests pass. The warning is about the
       # debug test binary only: the release binary is a separate link (lto,
       # strip). The exact object files are not traced. Keep the warning visible.
+      # The same warning can appear in the macOS leg of the verify job. The list
+      # of all known warnings is in docs/ci-warnings.md.
       - name: Lint with Clippy (hw-decode)
         run: cargo clippy --package cordiale-ui --all-targets --features hw-decode -- -D warnings
 

@@ -243,9 +243,12 @@ jobs:
       #   stub does not declare arm64, so the linker ignores it. FFmpeg does
       #   not need QTKit at run time.
       # - "no platform load command" for FFmpeg archive objects: the objects
-      #   come from the vcpkg FFmpeg archive (assembly objects). The linker
-      #   assumes macOS, which is the target.
-      # Remove neither FFmpeg nor hardware decoding to hide them.
+      #   are in the static libraries that the vcpkg FFmpeg build creates, not
+      #   in Cordiale code. The log does not name the objects, so the exact
+      #   files are not traced. The linker assumes macOS, which is the target
+      #   of both macOS jobs. The build and the checks below pass.
+      # Remove neither FFmpeg nor hardware decoding to hide them. The list of
+      # all known warnings is in docs/ci-warnings.md.
       - name: Build release binary (native, hardware decoding, macOS)
         id: mac_hw_build
         if: runner.os == 'macOS' && matrix.hw_decode == 'true' && steps.mac_ffmpeg.outcome == 'success'
