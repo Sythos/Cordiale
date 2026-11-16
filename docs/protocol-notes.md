@@ -928,20 +928,20 @@ esplicitamente richiesto dall'utente per la parità con Cicchetto:
   unitari puri, nessun bisogno di un server reale.
 - **Resa visiva**: Cicchetto disegna un layout radiale SVG interattivo
   (pan/zoom, colore per profondità, `cicchetto/src/lib/linksLayout.ts` +
-  `LinksModal.tsx`). Cordiale ha entrambe le rese: una lista testuale
-  indentata per profondità (schermata `"links"`) sempre disponibile, e
-  un bottone "Show graph" che apre una **seconda finestra OS**
-  (`LinksGraphWindow`, componente Slint `export` separato nello stesso
-  file, pattern confermato da fonte primaria — vedi §0septies) con un
-  layout radiale reale: `cordiale_core::links::radial_layout` posiziona
+  `LinksModal.tsx`). Cordiale mostra entrambe le rese insieme in **un
+  solo pannello flottante non modale** (`links-popup-open`) sopra la
+  chat, senza cambiare schermata, canale o bozza: grafo a sinistra (75%
+  della larghezza) e colonna scorrevole dei nomi indentati per profondità
+  a destra (25%), con zoom e scorrimento del grafo. Nessun bottone "Show
+  graph" e nessuna seconda finestra. Il layout radiale è reale:
+  `cordiale_core::links::radial_layout` posiziona
   ogni nodo per angolo (foglie = fette angolari uguali, nodo interno =
   media angolare dei figli, stesso principio di `assignAngles()` di
   Cicchetto) e raggio (`depth * ring_gap`, non `hopcount`), disegnato
   con l'elemento nativo Slint `Path` (proprietà `commands`, sintassi SVG
   path standard) per gli archi e `Rectangle`/`Text` posizionati per
   coordinate assolute per i nodi — niente caricamento SVG runtime,
-  niente dipendenza da rendering esterno. Nessun pan/zoom interattivo
-  (limite di questa sessione, non del meccanismo) e colore fisso per
+  niente dipendenza da rendering esterno. Il colore è fisso per
   nodo invece che per profondità (evitato il tipo `color` come campo di
   struct, non verificato con certezza — vedi §0septies). `hopcount` è
   mostrato accanto al nome server nella lista testuale, mai confuso con

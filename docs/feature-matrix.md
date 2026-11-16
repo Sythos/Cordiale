@@ -121,10 +121,11 @@ implementare alla cieca senza un server di test. Anche `/links`
 (comando slash, non endpoint REST/admin, ma richiesto esplicitamente
 per parità con Cicchetto) è implementato: ricostruzione dell'albero di
 rete identica a `buildTree()` di Cicchetto (`cordiale_core::links`),
-con **doppia resa** — lista indentata sempre disponibile, più un
-bottone "Show graph" che apre una seconda finestra con un vero layout
-radiale (stesso principio angolo/raggio di Cicchetto, disegnato con
-l'elemento nativo Slint `Path`, niente pan/zoom per ora) — dettaglio
+con **un solo pannello flottante non modale** sopra la chat (la
+schermata e il canale restano quelli correnti): grafo radiale a sinistra
+(75% della larghezza, stesso principio angolo/raggio di Cicchetto,
+disegnato con l'elemento nativo Slint `Path`, con zoom e scorrimento) e
+colonna scorrevole dei nomi dei nodi a destra (25%) — dettaglio
 completo in `docs/protocol-notes.md` §4ter.
 
 **Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i kind evento
