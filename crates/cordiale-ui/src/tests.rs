@@ -17334,6 +17334,7 @@ fn links_view_keeps_names_and_graph_on_one_network() {
 
 #[test]
 fn links_result_opens_the_panel_without_changing_the_screen() {
+    use slint::Model as _;
     set_headless_software_platform();
     let ui = AppWindow::new().unwrap();
     ui.set_screen("connected".into());
