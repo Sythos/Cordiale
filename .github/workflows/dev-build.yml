@@ -258,7 +258,10 @@ jobs:
 
       - name: Install FFmpeg with Homebrew
         shell: bash
-        run: brew install ffmpeg pkg-config
+        run: |
+          # The runner image already has pkgconf, so install only ffmpeg.
+          brew list --versions pkgconf > /dev/null || brew install pkgconf
+          brew install ffmpeg
 
       - name: Build release binary with hardware decoding
         shell: bash

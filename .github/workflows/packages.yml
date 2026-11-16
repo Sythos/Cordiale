@@ -216,7 +216,8 @@ jobs:
           set -euo pipefail
           # nasm: vcpkg needs it to build FFmpeg for x86 (the Intel package is
           # cross-built on an arm64 runner).
-          brew install pkg-config autoconf automake libtool nasm
+          brew list --versions pkgconf > /dev/null || brew install pkgconf
+          brew install autoconf automake libtool nasm
           git clone --depth 1 https://github.com/microsoft/vcpkg.git "${RUNNER_TEMP}/vcpkg"
           "${RUNNER_TEMP}/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           "${RUNNER_TEMP}/vcpkg/vcpkg" install "ffmpeg:${VCPKG_TRIPLET}"
