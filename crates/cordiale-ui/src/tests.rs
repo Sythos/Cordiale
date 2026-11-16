@@ -17584,7 +17584,7 @@ fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) ->
         slint::platform::update_timers_and_animations();
         ui.window().take_snapshot().unwrap();
     }
-    ui.get_chat_content_height().get()
+    ui.get_chat_content_height()
 }
 
 /// `count` rows of one date with the same text, as chat lines.
