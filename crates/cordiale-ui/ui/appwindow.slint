@@ -6378,8 +6378,8 @@ export component AppWindow inherits Window {
 
                                     Flickable {
                                         property <[EmojiItem]> items: emoji-grid(emoji-category, emoji-query);
-                                        viewport-height: Math.ceil(items.length / 8) * 34px;
-                                        viewport-width: self.width;
+                                        content-height: Math.ceil(items.length / 8) * 34px;
+                                        content-width: self.width;
                                         vertical-stretch: 1;
 
                                         for item[i] in items : Rectangle {
@@ -11149,8 +11149,8 @@ export component AppWindow inherits Window {
                     y: 0px;
                     width: parent.width * 0.75 - 3px;
                     height: parent.height;
-                    viewport-width: links-graph-canvas-size * 1px * links-zoom;
-                    viewport-height: links-graph-canvas-size * 1px * links-zoom;
+                    content-width: links-graph-canvas-size * 1px * links-zoom;
+                    content-height: links-graph-canvas-size * 1px * links-zoom;
 
                     Rectangle {
                         width: links-graph-canvas-size * 1px * links-zoom;
