@@ -75,6 +75,10 @@ impl OutputStatus {
     }
 }
 
+/// Status key of the settings screen: the new output opened for nothing, so
+/// the active sound stays on the old output.
+pub const NOT_MOVED_KEY: &str = "not-moved";
+
 /// The saved choice checked against the devices of the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
@@ -300,6 +304,20 @@ mod tests {
         assert_eq!(list.names[1], "Monitor");
         assert_eq!(list.names[2], "Monitor #2");
         assert_eq!(list.selected, 2);
+    }
+
+    #[test]
+    fn the_status_keys_are_distinct() {
+        let keys = [
+            OutputStatus::Ok.key(),
+            OutputStatus::Missing.key(),
+            OutputStatus::ListFailed.key(),
+            NOT_MOVED_KEY,
+            "applied",
+        ];
+        for (index, key) in keys.iter().enumerate() {
+            assert!(!keys[..index].contains(key), "duplicate key {key}");
+        }
     }
 
     #[test]

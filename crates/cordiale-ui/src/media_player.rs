@@ -78,6 +78,8 @@ pub enum MediaEvent {
     Ended,
     /// The file can't be opened, decoded or played.
     Failed(String),
+    /// The new output did not open: the sound goes on the old output.
+    OutputNotMoved(String),
 }
 
 enum Command {
@@ -221,11 +223,27 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 }
             }
             Ok(Command::Reopen) => {
-                device = None;
-                if let Some(open) = session.as_mut().filter(|open| !open.ended) {
-                    ensure_device(&mut device);
-                    if let Err(reason) = open.move_output(volume, device.as_ref()) {
-                        on_event(open.generation, MediaEvent::Failed(reason));
+                let moving = session
+                    .as_ref()
+                    .is_some_and(|open| !open.ended && open.audio.is_some());
+                let mut next = None;
+                ensure_device(&mut next);
+                if next.is_none() && moving {
+                    // The old output keeps the sound; the next file opens
+                    // the selected output again.
+                    if let Some(open) = session.as_ref() {
+                        on_event(
+                            open.generation,
+                            MediaEvent::OutputNotMoved("no audio output".to_string()),
+                        );
+                    }
+                } else {
+                    device = next;
+                    if let Some(open) = session.as_mut().filter(|open| !open.ended) {
+                        if let Err(reason) = open.move_output(volume, device.as_ref()) {
+                            on_event(open.generation, MediaEvent::OutputNotMoved(reason.clone()));
+                            on_event(open.generation, MediaEvent::Failed(reason));
+                        }
                     }
                 }
             }
@@ -708,6 +726,9 @@ fn apply(ui: &AppWindow, generation: u64, event: MediaEvent) {
             ui.set_media_image(slint::Image::from_rgba8(buffer));
         }
         MediaEvent::Ended => ui.set_media_playing(false),
+        MediaEvent::OutputNotMoved(_) => {
+            ui.set_audio_output_status(crate::audio_output::NOT_MOVED_KEY.into());
+        }
         MediaEvent::Failed(reason) => {
             ui.set_media_error(reason.into());
             ui.set_media_kind("failed".into());

@@ -48,6 +48,8 @@ pub enum PlayerEvent {
     Failed(String),
     /// The server ended the stream.
     Ended,
+    /// The new output did not open: the station goes on the old output.
+    OutputNotMoved(String),
 }
 
 enum Command {
@@ -111,6 +113,8 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
     let mut device: Option<rodio::MixerDeviceSink> = None;
     let mut current: Option<(Arc<rodio::Player>, Arc<AtomicBool>)> = None;
     let mut volume = 1.0;
+    // The open output is not the selected one: the move to it failed.
+    let mut stale = false;
     // The station that plays now, to tune it again on another output.
     let mut tuned: Option<(String, bool, &'static str, u64)> = None;
     let gate = Arc::new(Mutex::new(()));
@@ -118,8 +122,25 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
         let command = match command {
             Command::Reopen => {
                 let active = current.is_some();
-                stop_current(&mut current, &gate);
-                device = None;
+                match crate::audio_output::open_selected_sink() {
+                    Ok(sink) => {
+                        stop_current(&mut current, &gate);
+                        device = Some(sink);
+                        stale = false;
+                    }
+                    Err(err) => {
+                        // The old output keeps the station; a later tune
+                        // opens the selected output again.
+                        match tuned.as_ref().filter(|_| active) {
+                            Some((_, _, _, generation)) => {
+                                on_event(*generation, PlayerEvent::OutputNotMoved(err));
+                                stale = true;
+                            }
+                            None => device = None,
+                        }
+                        continue;
+                    }
+                }
                 match tuned.clone() {
                     Some((url, allow_local, hint, generation)) if active => Command::Play {
                         url,
@@ -142,9 +163,12 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
             } => {
                 stop_current(&mut current, &gate);
                 tuned = Some((url.clone(), allow_local, hint, generation));
-                if device.is_none() {
+                if device.is_none() || stale {
                     match crate::audio_output::open_selected_sink() {
-                        Ok(sink) => device = Some(sink),
+                        Ok(sink) => {
+                            device = Some(sink);
+                            stale = false;
+                        }
                         Err(err) => {
                             on_event(generation, PlayerEvent::Failed(err));
                             continue;

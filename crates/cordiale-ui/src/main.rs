@@ -6229,6 +6229,12 @@ fn handle_radio_event(
         player::PlayerEvent::Ended => {
             tuned.status = if tuned.upload { "finished" } else { "ended" };
         }
+        player::PlayerEvent::OutputNotMoved(error) => {
+            persistence::log_line(&format!("radio stays on the old audio output: {error}"));
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_audio_output_status(audio_output::NOT_MOVED_KEY.into());
+            });
+        }
     }
     push_radio_now(ui, radio_state);
 }

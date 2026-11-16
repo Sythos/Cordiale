@@ -130,6 +130,30 @@ Windows, macOS e Linux, con un'uscita audio reale.
 Esito: queste prove richiedono un dispositivo audio reale e non girano in CI.
 Nessun risultato è stato consegnato finora: la causa resta non confermata.
 
+## Prova della scelta dell'uscita audio (issue 830)
+
+Prova a mano da ripetere su Windows, macOS e Linux, meglio con un computer che
+ha più uscite audio. Radio, file audio e audio dei video usano la stessa
+uscita.
+
+1. Aprire Impostazioni > Generale. La sezione `Uscita audio` sta prima di
+   `Upload`. L'elenco ha solo uscite, nessun microfono; la prima voce è
+   l'uscita predefinita del sistema.
+2. Avviare una radio e scegliere un'altra uscita senza premere `Applica`: il
+   suono resta sull'uscita di prima.
+3. Premere `Applica`: la radio passa alla nuova uscita con la stessa stazione e
+   lo stesso volume.
+4. Aprire un file audio e un video con audio, scegliere un'altra uscita e
+   premere `Applica`: posizione, pausa e volume restano.
+5. Riavviare Cordiale: la scelta resta selezionata.
+6. Scollegare l'uscita scelta e riaprire la scheda: compare l'avviso che
+   l'uscita non c'è e il suono va sull'uscita predefinita.
+7. Se l'uscita nuova non si apre, il suono in corso resta sulla vecchia uscita
+   e sotto l'elenco compare l'avviso che non ha potuto passare alla nuova.
+
+Esito: queste prove richiedono dispositivi audio reali e non girano in CI.
+Nessun risultato è stato consegnato finora.
+
 ## Build per i tester
 
 - **Linux x64:** il workflow manuale `Dev Build` (job `linux-x64-hw-dev`)
