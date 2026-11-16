@@ -11182,6 +11182,7 @@ fn with_chat_lines_model(ui: &AppWindow, mutate: impl FnOnce(&slint::VecModel<Ch
 /// `appwindow.slint`'s `chat-list.follow-bottom` logic hold the view
 /// steady instead of jumping (GitHub issue #89).
 fn show_chat_lines(ui: &AppWindow, lines: Vec<ChatLine>) {
+    layout_trace::invalidate_chat_rows();
     with_chat_lines_model(ui, |model| model.set_vec(lines));
 }
 

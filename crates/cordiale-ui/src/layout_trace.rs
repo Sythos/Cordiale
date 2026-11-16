@@ -29,11 +29,11 @@
 //! `CORDIALE_LAYOUT_TRACE` variable is `1`. The tests read the same data
 //! from a headless window.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use slint::Model as _;
+use slint::{ComponentHandle, Model as _};
 
 use crate::AppWindow;
 
@@ -83,19 +83,56 @@ pub(crate) fn record_row_box(
     rows.retain(|&kept, _| usize::try_from(kept).is_ok_and(|kept| kept < row_count));
 }
 
+thread_local! {
+    /// The number of times the chat rows were reset on this thread. The
+    /// layout of one reset is not the layout of the next one.
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Starts a new layout generation. Call it before the chat rows are reset:
+/// the boxes that the rows reported before it no longer match the rows.
+pub(crate) fn invalidate_chat_rows() {
+    GENERATION.with(|generation| generation.set(generation.get() + 1));
+}
+
+/// The current layout generation of this thread.
+pub(crate) fn chat_rows_generation() -> u64 {
+    GENERATION.with(Cell::get)
+}
+
+/// Like `record_row_box`, but first drops all boxes when `generation` is not
+/// the one that `seen` holds, so boxes of two layouts never meet.
+pub(crate) fn record_row_box_in_generation(
+    rows: &mut BTreeMap<i32, RowBox>,
+    seen: &Cell<u64>,
+    generation: u64,
+    index: i32,
+    row_box: RowBox,
+    row_count: usize,
+) {
+    if seen.get() != generation {
+        rows.clear();
+        seen.set(generation);
+    }
+    record_row_box(rows, index, row_box, row_count);
+}
+
 /// Collects the boxes the chat rows report. With `print`, each report and
 /// each gap between rows also goes to the standard error output.
 pub(crate) fn register_chat_layout_trace(ui: &AppWindow, print: bool) -> RowBoxes {
     let boxes: RowBoxes = Rc::new(RefCell::new(BTreeMap::new()));
     let store = boxes.clone();
     let weak = ui.as_weak();
+    let seen = Cell::new(chat_rows_generation());
     ui.on_chat_row_laid_out(move |index, top, height| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
         let mut rows = store.borrow_mut();
-        record_row_box(
+        record_row_box_in_generation(
             &mut rows,
+            &seen,
+            chat_rows_generation(),
             index,
             (top, height),
             ui.get_chat_lines().row_count(),

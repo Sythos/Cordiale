@@ -17819,6 +17819,37 @@ fn layout_trace_keeps_only_the_rows_the_model_has() {
 }
 
 #[test]
+fn layout_trace_drops_the_boxes_of_an_earlier_layout() {
+    let mut rows = std::collections::BTreeMap::new();
+    let seen = std::cell::Cell::new(0);
+    for index in 0..4 {
+        layout_trace::record_row_box_in_generation(
+            &mut rows,
+            &seen,
+            0,
+            index,
+            (index as f32 * 10., 10.),
+            4,
+        );
+    }
+    // The rows are reset: only row 2 reports again, one pixel lower. The
+    // old boxes of rows 1 and 3 must not give a gap next to it.
+    let generation = layout_trace::chat_rows_generation() + 1;
+    layout_trace::record_row_box_in_generation(&mut rows, &seen, generation, 2, (21., 10.), 4);
+    assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![2]);
+    assert!(layout_trace::chat_row_gaps(&rows, 0.5).is_empty());
+}
+
+#[test]
+fn showing_chat_lines_starts_a_new_layout_generation() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    let before = layout_trace::chat_rows_generation();
+    show_chat_lines(&ui, Vec::new());
+    assert_eq!(layout_trace::chat_rows_generation(), before + 1);
+}
+
+#[test]
 fn rendered_rows_follow_each_other_with_no_blank_band() {
     set_headless_software_platform();
     let lines = chat_lines_model(&mixed_kind_rows(), true);
