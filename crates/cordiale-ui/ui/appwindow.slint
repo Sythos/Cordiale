@@ -132,6 +132,13 @@ struct CommandSuggestion {
     syntax: string,
 }
 
+// One emoji in the `:shortcode` list or the picker grid: the Unicode text and
+// the text shown next to it (shortcode or name).
+struct EmojiItem {
+    glyph: string,
+    label: string,
+}
+
 // Per-file upload limits advertised by the server (sizes already
 // formatted; `video-seconds` empty when not advertised).
 struct UploadLimitsRow {
@@ -1798,14 +1805,44 @@ export component AppWindow inherits Window {
     // The Rust side owns the filter and the usage order; the user's choice
     // fills the compose box but never sends it.
     // Another window brings its own draft: the list would be stale.
-    changed window-source-target => { command-picker-open = false; }
-    changed window-source-network => { command-picker-open = false; }
+    changed window-source-target => { command-picker-open = false; emoji-suggest-open = false; }
+    changed window-source-network => { command-picker-open = false; emoji-suggest-open = false; }
     // A write from code (for example a Reply quote) does not reach the Rust
     // filter: a draft that no longer starts with a slash closes the list.
     changed compose-text => {
         if !compose-text.starts-with("/") {
             command-picker-open = false;
         }
+    }
+    // The `:shortcode` list: the matching emoji (set from Rust as the user
+    // types), whether the list is open, the highlighted entry and the draft
+    // the list was made for. A draft changed from code does not match that
+    // text, so the list hides itself.
+    in-out property <[EmojiItem]> emoji-suggestions: [];
+    in-out property <bool> emoji-suggest-open: false;
+    in-out property <int> emoji-suggest-index: 0;
+    in-out property <string> emoji-suggest-for: "";
+    // Rust owns the search and the text edit. The caret is taken to be at
+    // the end of the draft, as nick completion does, because the line edit
+    // does not report it.
+    pure callback emoji-complete(string, string) -> string;
+    pure callback emoji-insert(string, string) -> string;
+    pure callback emoji-grid(int, string) -> [EmojiItem];
+    property <bool> emoji-suggest-visible: has-selected-channel && !current-server-window
+        && emoji-suggest-open && emoji-suggest-for == compose-text && emoji-suggestions.length > 0;
+    function accept-emoji-suggestion(index: int) {
+        if index >= 0 && index < emoji-suggestions.length {
+            compose-text = emoji-complete(compose-text, emoji-suggestions[index].glyph);
+            compose-text-changed(compose-text);
+        }
+        emoji-suggest-open = false;
+        compose-focus-request += 1;
+    }
+    function insert-emoji(glyph: string) {
+        compose-text = emoji-insert(compose-text, glyph);
+        compose-text-changed(compose-text);
+        emoji-suggest-open = false;
+        compose-focus-request += 1;
     }
     function accept-command-suggestion(index: int) {
         if index >= 0 && index < command-suggestions.length {
@@ -6151,6 +6188,64 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // The `:shortcode` list, docked above the compose bar like the
+            // command picker. A choice replaces the shortcode and never sends.
+            if emoji-suggest-visible : Rectangle {
+                height: min(emoji-suggestions.length * 28px, 168px) + 4px;
+                border-width: 1px;
+                border-color: #8080807f;
+                border-radius: 5px;
+                accessible-role: list;
+                accessible-label: @tr("Emoji suggestions");
+
+                ListView {
+                    property <int> selected-row: emoji-suggest-index;
+                    function reveal-selected() {
+                        if self.visible-height > 0px {
+                            let top = selected-row * 28px;
+                            if top < -self.content-y {
+                                self.content-y = -top;
+                            }
+                            if top + 28px > -self.content-y + self.visible-height {
+                                self.content-y = self.visible-height - top - 28px;
+                            }
+                        }
+                    }
+                    changed selected-row => { reveal-selected(); }
+
+                    for item[index] in emoji-suggestions : Rectangle {
+                        height: 28px;
+                        background: index == emoji-suggest-index ? #80808033 : transparent;
+                        accessible-role: list-item;
+                        accessible-label: item.glyph + " " + item.label;
+                        accessible-action-default => { accept-emoji-suggestion(index); }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            Text {
+                                text: item.glyph;
+                                vertical-alignment: center;
+                                min-width: 24px;
+                            }
+                            Text {
+                                text: item.label;
+                                color: palette-muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { accept-emoji-suggestion(index); }
+                        }
+                    }
+                }
+            }
+
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
@@ -6166,6 +6261,151 @@ export component AppWindow inherits Window {
                     clicked => { attach-file-requested(); }
                 }
 
+                // Emoji picker button, between the paperclip and the field.
+                // Not shown for the server command input.
+                if !current-server-window : Rectangle {
+                    width: 36px;
+                    property <int> emoji-category: 0;
+                    property <string> emoji-query: "";
+                    property <[string]> category-names: [
+                        @tr("Faces and people"),
+                        @tr("Animals and nature"),
+                        @tr("Food and drink"),
+                        @tr("Travel and places"),
+                        @tr("Activities"),
+                        @tr("Objects"),
+                        @tr("Symbols"),
+                        @tr("Flags"),
+                    ];
+                    // The picker belongs to one window: another window closes it.
+                    property <string> picker-target: window-source-target;
+                    property <string> picker-network: window-source-network;
+                    changed picker-target => { emoji-popup.close(); }
+                    changed picker-network => { emoji-popup.close(); }
+
+                    Button {
+                        text: "🙂";
+                        accessible-label: @tr("Emoji");
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: !current-query || current-query-ready;
+                        clicked => {
+                            emoji-query = "";
+                            emoji-category = 0;
+                            emoji-popup.show();
+                        }
+                    }
+
+                    // Opens above the button; Slint keeps it inside the window.
+                    emoji-popup := PopupWindow {
+                        x: 0px;
+                        y: -self.height - 4px;
+                        width: 292px;
+                        height: 340px;
+                        close-policy: close-on-click-outside;
+
+                        Rectangle {
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            border-radius: 5px;
+
+                            FocusScope {
+                                capture-key-pressed(event) => {
+                                    if event.text == Key.Escape {
+                                        emoji-popup.close();
+                                        compose-focus-request += 1;
+                                        return EventResult.accept;
+                                    }
+                                    return EventResult.reject;
+                                }
+
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 4px;
+
+                                    LineEdit {
+                                        placeholder-text: @tr("Search emoji");
+                                        accessible-label: @tr("Search emoji");
+                                        text <=> emoji-query;
+                                        // The popup is built on every show: the field takes the focus.
+                                        init => { self.focus(); }
+                                    }
+
+                                    HorizontalLayout {
+                                        height: 30px;
+                                        for icon[i] in ["😀", "🐻", "🍔", "✈", "⚽", "💡", "❤", "🏁"] : Rectangle {
+                                            background: i == emoji-category && emoji-query == "" ? #80808040 : transparent;
+                                            border-radius: 4px;
+                                            accessible-role: button;
+                                            accessible-label: category-names[i];
+                                            accessible-action-default => { emoji-query = ""; emoji-category = i; }
+                                            Text {
+                                                text: icon;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    emoji-query = "";
+                                                    emoji-category = i;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: emoji-query == "" ? category-names[emoji-category] : @tr("Search results");
+                                        font-weight: 700;
+                                        color: palette-muted;
+                                        overflow: elide;
+                                    }
+
+                                    Flickable {
+                                        property <[EmojiItem]> items: emoji-grid(emoji-category, emoji-query);
+                                        viewport-height: Math.ceil(items.length / 8) * 34px;
+                                        viewport-width: self.width;
+                                        vertical-stretch: 1;
+
+                                        for item[i] in items : Rectangle {
+                                            x: Math.mod(i, 8) * 34px;
+                                            y: Math.floor(i / 8) * 34px;
+                                            width: 34px;
+                                            height: 34px;
+                                            border-radius: 4px;
+                                            background: cell-touch.has-hover ? #80808040 : transparent;
+                                            accessible-role: button;
+                                            accessible-label: item.glyph + " " + item.label;
+                                            accessible-action-default => { insert-emoji(item.glyph); emoji-popup.close(); }
+                                            Text {
+                                                text: item.glyph;
+                                                font-size: 20px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            cell-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    insert-emoji(item.glyph);
+                                                    emoji-popup.close();
+                                                }
+                                            }
+                                        }
+
+                                        if items.length == 0 : Text {
+                                            text: @tr("No emoji found");
+                                            color: palette-muted;
+                                            x: 4px;
+                                            y: 4px;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 FocusScope {
                     horizontal-stretch: 1;
                     capture-key-pressed(event) => {
@@ -6178,6 +6418,27 @@ export component AppWindow inherits Window {
                             chat-page-direction = event.text == Key.PageUp ? -1 : 1;
                             chat-page-seq += 1;
                             return EventResult.accept;
+                        }
+                        // The `:shortcode` list owns the same keys while it is
+                        // open: Up/Down move, Enter and Tab select (never
+                        // send), Escape closes and keeps the text.
+                        if emoji-suggest-visible {
+                            if event.text == Key.UpArrow {
+                                emoji-suggest-index = max(emoji-suggest-index - 1, 0);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.DownArrow {
+                                emoji-suggest-index = min(emoji-suggest-index + 1, emoji-suggestions.length - 1);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.Return || event.text == Key.Tab {
+                                accept-emoji-suggestion(emoji-suggest-index);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.Escape {
+                                emoji-suggest-open = false;
+                                return EventResult.accept;
+                            }
                         }
                         // While the command picker is open it owns Up/Down,
                         // Enter and Tab (select, never send) and Escape
