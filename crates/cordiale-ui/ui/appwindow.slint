@@ -2243,6 +2243,8 @@ export component AppWindow inherits Window {
     in property <string> upload-confirm-size: "";
     in property <string> upload-confirm-kind: "";
     in property <bool> upload-confirm-has-preview: false;
+    // A video frame is being prepared in the background.
+    in property <bool> upload-confirm-loading: false;
     in property <image> upload-confirm-preview;
     in-out property <int> upload-confirm-ttl-index: 0;
     // The same choice for this one upload (videos only); it starts from
@@ -10555,7 +10557,8 @@ export component AppWindow inherits Window {
 
                     Text {
                         width: parent.width - 16px;
-                        text: upload-confirm-kind == "video" ? @tr("🎬 No preview for videos.")
+                        text: upload-confirm-loading ? @tr("⏳ Preparing the preview…")
+                            : upload-confirm-kind == "video" ? @tr("🎬 This video can't be previewed.")
                             : upload-confirm-kind == "audio" ? @tr("🎵 No preview for audio.")
                             : upload-confirm-kind == "image" ? @tr("📸 This image can't be previewed.")
                             : @tr("📄 No preview for this file.");

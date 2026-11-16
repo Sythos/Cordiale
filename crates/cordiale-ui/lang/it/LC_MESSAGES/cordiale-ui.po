@@ -1237,8 +1237,12 @@ msgid "Preview of {}"
 msgstr "Anteprima di {}"
 
 msgctxt "AppWindow"
-msgid "🎬 No preview for videos."
-msgstr "🎬 Nessuna anteprima per i video."
+msgid "🎬 This video can't be previewed."
+msgstr "🎬 Questo video non ha un'anteprima."
+
+msgctxt "AppWindow"
+msgid "⏳ Preparing the preview…"
+msgstr "⏳ Preparazione dell'anteprima…"
 
 msgctxt "AppWindow"
 msgid "🎵 No preview for audio."

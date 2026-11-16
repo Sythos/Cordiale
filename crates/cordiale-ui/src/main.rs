@@ -5485,6 +5485,79 @@ fn upload_preview(path: &std::path::Path) -> Option<slint::Image> {
     slint::Image::load_from_path(path).ok()
 }
 
+/// Largest video file that the confirmation reads for its poster frame.
+const PREVIEW_VIDEO_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+thread_local! {
+    /// Counts the confirmations, so a poster that arrives late is dropped.
+    static PREVIEW_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Starts a new confirmation (or ends it) and returns its number.
+fn next_preview_generation() -> u64 {
+    PREVIEW_GENERATION.with(|generation| {
+        let next = generation.get().wrapping_add(1);
+        generation.set(next);
+        next
+    })
+}
+
+/// A poster belongs to the open confirmation only when its number and its
+/// file are the current ones.
+fn preview_is_current(
+    pending: Option<&std::path::Path>,
+    path: &std::path::Path,
+    generation: u64,
+    current: u64,
+) -> bool {
+    generation == current && pending == Some(path)
+}
+
+/// One early frame of a video file, as RGBA pixels inside the preview bounds.
+/// `None` when the file is too large, corrupt or not supported.
+fn video_preview_pixels(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
+    if std::fs::metadata(path).ok()?.len() > PREVIEW_VIDEO_MAX_BYTES {
+        return None;
+    }
+    let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(std::fs::read(path).ok()?);
+    let extension = path.extension()?.to_string_lossy().into_owned();
+    let poster = media_player::poster_frame(&bytes, &extension).ok()?;
+    let frame = image::RgbaImage::from_raw(poster.width, poster.height, poster.rgba)?;
+    let thumb = image::DynamicImage::ImageRgba8(frame)
+        .thumbnail(640, 360)
+        .to_rgba8();
+    Some((thumb.width(), thumb.height(), thumb.into_raw()))
+}
+
+/// Prepares the poster frame of `path` on a background thread. The result
+/// shows only while the confirmation of `generation` is still open.
+fn start_video_preview(ui: &AppWindow, path: std::path::PathBuf, generation: u64) {
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let pixels = video_preview_pixels(&path);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let current = PREVIEW_GENERATION.with(std::cell::Cell::get);
+            let current_ok = PENDING_UPLOAD.with(|pending| {
+                preview_is_current(pending.borrow().as_deref(), &path, generation, current)
+            });
+            if !current_ok {
+                return;
+            }
+            ui.set_upload_confirm_loading(false);
+            if let Some((width, height, rgba)) = pixels {
+                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &rgba, width, height,
+                );
+                ui.set_upload_confirm_preview(slint::Image::from_rgba8(buffer));
+                ui.set_upload_confirm_has_preview(true);
+            }
+        });
+    });
+}
+
 /// Asks for the upload when Settings says so, then hands `path` to the
 /// worker with the chosen lifetime: the paperclip, a dropped file and a
 /// paste all end here, as in Cicchetto. With the question on, the popup
@@ -5507,8 +5580,14 @@ fn confirm_and_attach(
             Some(UploadCategory::Image) => upload_preview(&path),
             _ => None,
         };
+        let generation = next_preview_generation();
+        let loading = category == Some(UploadCategory::Video);
         ui.set_upload_confirm_has_preview(preview.is_some());
         ui.set_upload_confirm_preview(preview.unwrap_or_default());
+        ui.set_upload_confirm_loading(loading);
+        if loading {
+            start_video_preview(ui, path.clone(), generation);
+        }
         let kind = match category {
             Some(UploadCategory::Image) => "image",
             Some(UploadCategory::Video) => "video",
@@ -5539,7 +5618,9 @@ fn finish_upload_confirm(ui: &AppWindow, tx: &mpsc::UnboundedSender<WorkerComman
         expire: upload_ttl_for_index(ui.get_upload_confirm_ttl_index()),
         shrink: ui.get_upload_confirm_shrink(),
     };
+    next_preview_generation();
     ui.set_upload_confirm_open(false);
+    ui.set_upload_confirm_loading(false);
     ui.set_upload_confirm_preview(slint::Image::default());
     let Some(path) = PENDING_UPLOAD.with(|pending| pending.borrow_mut().take()) else {
         return;
