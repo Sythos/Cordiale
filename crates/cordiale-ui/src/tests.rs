@@ -20,13 +20,12 @@ fn a_late_video_preview_is_dropped() {
 
 #[test]
 fn a_video_preview_needs_a_small_readable_video() {
-    let dir = temp_files::private_subdir().expect("private dir");
-    let missing = dir.join("missing-video.mp4");
+    let dir = tempfile::tempdir().expect("test folder");
+    let missing = dir.path().join("missing-video.mp4");
     assert!(video_preview_pixels(&missing).is_none());
-    let corrupt = dir.join("corrupt-video.webm");
+    let corrupt = dir.path().join("corrupt-video.webm");
     std::fs::write(&corrupt, [0u8; 64]).expect("write");
     assert!(video_preview_pixels(&corrupt).is_none());
-    let _ = std::fs::remove_file(&corrupt);
 }
 
 #[test]
