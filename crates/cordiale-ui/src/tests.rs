@@ -16859,6 +16859,64 @@ fn trim_outer_line_breaks_removes_only_the_end_breaks() {
 }
 
 #[test]
+fn trim_outer_line_breaks_removes_blank_lines_with_spaces() {
+    let white = (255, 255, 255);
+    let mut runs = vec![
+        (" \n\t\n".to_string(), white, false),
+        ("  one\n \n two".to_string(), white, false),
+        (" \n  \n".to_string(), white, false),
+        ("  ".to_string(), white, false),
+    ];
+    trim_outer_line_breaks(&mut runs);
+    assert_eq!(visible_body_text(&runs), "  one\n \n two");
+
+    // Spaces with no line break stay: they are not a blank line.
+    let mut spaced = vec![("one two  ".to_string(), white, false)];
+    trim_outer_line_breaks(&mut spaced);
+    assert_eq!(visible_body_text(&spaced), "one two  ");
+}
+
+#[test]
+fn layout_break_characters_never_add_a_line_to_a_row() {
+    assert_eq!(
+        flatten_layout_breaks("a\u{b}b\u{c}c\u{85}d\u{2028}e\u{2029}f"),
+        "a b c d e f"
+    );
+    assert_eq!(flatten_layout_breaks("one\ntwo"), "one\ntwo");
+    let chat_row = |text: &str| {
+        chat_line_from_message(
+            &render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": text, "id": 1}),
+                None,
+            ),
+            true,
+            "",
+        )
+    };
+    let plain = chat_row("one\u{2028}\u{2029}two");
+    assert!(plain.selectable);
+    assert_eq!(plain.selectable_body.as_str(), "one  two");
+    let linked = chat_row("one\u{2029}https://example.org/a");
+    assert_eq!(linked.overlay_body.as_str(), "one 🌐 https://example.org/a");
+}
+
+#[test]
+fn rows_of_one_date_are_one_row_each_with_no_empty_row() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 16), (9, 0), false),
+        dated_row(2, (2026, 11, 16), (9, 1), false),
+        dated_row(3, (2026, 11, 16), (9, 2), false),
+    ];
+    let lines = chat_lines_model(&rows, true);
+    assert_eq!(lines.len(), rows.len());
+    for (line, row) in lines.iter().zip(&rows) {
+        assert!(line.separator.is_empty());
+        assert_eq!(line.reply_body.as_str(), row.text);
+        assert!(!line.selectable_body.is_empty() || !line.overlay_body.is_empty());
+    }
+}
+
+#[test]
 fn selectable_body_text_keeps_only_plain_single_style_rows() {
     let white = (255, 255, 255);
     let red = (255, 0, 0);

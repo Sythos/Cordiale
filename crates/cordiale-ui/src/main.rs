@@ -9912,6 +9912,9 @@ fn chat_line_from_message(
             })
             .collect();
     let mut runs = runs;
+    for run in &mut runs {
+        run.0 = flatten_layout_breaks(&run.0);
+    }
     // A decrypted chat message keeps the line breaks the sender typed. Every
     // other row is one IRC line, so a stray break stays a space.
     let keep_breaks =
@@ -10019,13 +10022,28 @@ fn chat_line_from_message(
     }
 }
 
-/// Removes the line breaks before the first and after the last visible
-/// character of a row. A break at an end of the text adds an empty line, and
-/// so a blank band, to the row. Breaks between words stay.
+/// Replaces the characters that a text layout reads as a line break, other
+/// than LF and CR, with a space: vertical tab, form feed, next line, line
+/// separator and paragraph separator. The layout would add an empty line, and
+/// so a blank band, to the row. LF and CR are handled by the row builder.
+fn flatten_layout_breaks(text: &str) -> String {
+    text.replace(
+        ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'],
+        " ",
+    )
+}
+
+/// Removes the blank lines before the first and after the last visible
+/// character of a row. A line break at an end of the text adds an empty line,
+/// and so a blank band, to the row. A line that has only spaces counts as
+/// blank. Breaks between words stay.
 fn trim_outer_line_breaks(runs: &mut Vec<(String, (u8, u8, u8), bool)>) {
+    const BLANK: [char; 3] = ['\n', ' ', '\t'];
     while let Some(last) = runs.last_mut() {
-        let kept = last.0.trim_end_matches('\n').len();
-        last.0.truncate(kept);
+        let kept = last.0.trim_end_matches(BLANK).len();
+        if kept == 0 || last.0[kept..].contains('\n') {
+            last.0.truncate(kept);
+        }
         if last.0.is_empty() {
             runs.pop();
         } else {
@@ -10033,8 +10051,14 @@ fn trim_outer_line_breaks(runs: &mut Vec<(String, (u8, u8, u8), bool)>) {
         }
     }
     while let Some(first) = runs.first_mut() {
-        let rest = first.0.trim_start_matches('\n').to_string();
-        first.0 = rest;
+        let blank_len = first.0.len() - first.0.trim_start_matches(BLANK).len();
+        if let Some(last_break) = first.0[..blank_len].rfind('\n') {
+            first.0 = if blank_len == first.0.len() {
+                String::new()
+            } else {
+                first.0[last_break + 1..].to_string()
+            };
+        }
         if first.0.is_empty() {
             runs.remove(0);
         } else {
