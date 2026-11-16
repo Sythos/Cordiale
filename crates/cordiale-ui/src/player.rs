@@ -157,6 +157,13 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 let player = Arc::new(rodio::Player::connect_new(sink.mixer()));
                 player.set_volume(volume);
                 let cancelled = Arc::new(AtomicBool::new(false));
+                // The stream reports only through this sink, which drops
+                // the events of a cancelled stream.
+                let events = guarded_sink(
+                    Arc::clone(&gate),
+                    Arc::clone(&cancelled),
+                    Arc::clone(&on_event),
+                );
                 start_stream(
                     url,
                     allow_local,
@@ -164,8 +171,7 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                     generation,
                     Arc::clone(&player),
                     Arc::clone(&cancelled),
-                    Arc::clone(&gate),
-                    Arc::clone(&on_event),
+                    events,
                 );
                 current = Some((player, cancelled));
             }
@@ -226,10 +232,8 @@ fn start_stream(
     generation: u64,
     player: Arc<rodio::Player>,
     cancelled: Arc<AtomicBool>,
-    gate: Arc<Mutex<()>>,
     on_event: EventSink,
 ) {
-    let on_event = guarded_sink(gate, Arc::clone(&cancelled), on_event);
     let (bytes_tx, bytes_rx) = mpsc::sync_channel::<Vec<u8>>(BYTE_CHUNKS);
     let network_cancelled = Arc::clone(&cancelled);
     let network_events = Arc::clone(&on_event);
