@@ -2256,6 +2256,54 @@ mod tests {
     }
 
     #[test]
+    fn a_real_mp4_file_gives_its_h264_picture() {
+        let bytes: Arc<[u8]> = Arc::from(crate::media_fixtures::mp4_h264());
+        for extension in ["mp4", "MOV", "m4v"] {
+            let poster = poster_frame(&bytes, extension).expect("poster");
+            assert_eq!(
+                (poster.width, poster.height),
+                crate::media_fixtures::PICTURE_SIZE
+            );
+            let row = poster.width as usize * 4;
+            assert_eq!(poster.rgba.len(), row * poster.height as usize);
+            // The left block is dark and the right block is bright.
+            assert!(poster.rgba[0] < 80, "left red {}", poster.rgba[0]);
+            assert!(
+                poster.rgba[row - 4] > 180,
+                "right red {}",
+                poster.rgba[row - 4]
+            );
+            assert!(poster.rgba.chunks(4).all(|pixel| pixel[3] == 255));
+        }
+    }
+
+    #[test]
+    fn a_real_webm_file_gives_its_vp8_picture() {
+        let bytes: Arc<[u8]> = Arc::from(crate::media_fixtures::webm_vp8());
+        let poster = poster_frame(&bytes, "webm").expect("poster");
+        assert_eq!(
+            (poster.width, poster.height),
+            crate::media_fixtures::PICTURE_SIZE
+        );
+        assert_eq!(
+            poster.rgba.len(),
+            (poster.width * poster.height * 4) as usize
+        );
+        assert!(poster.rgba.chunks(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn a_video_cut_short_has_no_poster() {
+        let mp4 = crate::media_fixtures::mp4_h264();
+        let webm = crate::media_fixtures::webm_vp8();
+        // The mp4 loses its picture data; the webm loses its header tail.
+        let cut: Arc<[u8]> = Arc::from(&mp4[..mp4.len() - 200]);
+        assert!(poster_frame(&cut, "mp4").is_err());
+        let cut: Arc<[u8]> = Arc::from(&webm[..40]);
+        assert!(poster_frame(&cut, "webm").is_err());
+    }
+
+    #[test]
     fn a_missing_audio_track_is_not_logged() {
         assert!(!audio_error_is_loggable(NO_AUDIO_TRACK));
         assert!(audio_error_is_loggable("unsupported audio"));

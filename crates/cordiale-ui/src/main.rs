@@ -47,6 +47,8 @@ mod input_history;
 mod key_prompt;
 mod link_hover;
 mod media_demux;
+#[cfg(test)]
+mod media_fixtures;
 mod media_hw;
 mod media_player;
 mod media_save;
@@ -5513,10 +5515,15 @@ fn preview_is_current(
     generation == current && pending == Some(path)
 }
 
+/// Whether a video file of `len` bytes is small enough to read for a poster.
+fn video_preview_fits(len: u64) -> bool {
+    len <= PREVIEW_VIDEO_MAX_BYTES
+}
+
 /// One early frame of a video file, as RGBA pixels inside the preview bounds.
 /// `None` when the file is too large, corrupt or not supported.
 fn video_preview_pixels(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
-    if std::fs::metadata(path).ok()?.len() > PREVIEW_VIDEO_MAX_BYTES {
+    if !video_preview_fits(std::fs::metadata(path).ok()?.len()) {
         return None;
     }
     let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(std::fs::read(path).ok()?);
