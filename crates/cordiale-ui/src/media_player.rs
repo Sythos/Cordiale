@@ -2085,9 +2085,88 @@ fn open_video(
     Ok((player, audio))
 }
 
+/// How many samples the poster frame may decode before it gives up.
+const POSTER_MAX_SAMPLES: usize = 240;
+
+/// One still picture of a video, as straight RGBA.
+pub struct Poster {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// The first picture that `player` decodes. It never starts the sound or the
+/// clock, and it decodes at most [`POSTER_MAX_SAMPLES`] samples.
+fn first_picture(mut player: VideoPlayer) -> Result<Poster, String> {
+    for _ in 0..POSTER_MAX_SAMPLES {
+        if !player.decoded.is_empty() || player.drained {
+            break;
+        }
+        player.decode_next();
+    }
+    let (_, picture) = player.decoded.pop_front().ok_or("no decodable frame")?;
+    let rgba = to_rgba(&picture).ok_or("frame can't be converted")?;
+    Ok(Poster {
+        width: u32::try_from(picture.width).map_err(|_| "frame too large")?,
+        height: u32::try_from(picture.height).map_err(|_| "frame too large")?,
+        rgba,
+    })
+}
+
+/// The first decodable picture of an MP4, MOV, M4V or WebM file, for the
+/// upload confirmation. Software decoding only; no sound is opened.
+pub fn poster_frame(bytes: &Arc<[u8]>, extension: &str) -> Result<Poster, String> {
+    let track = if extension.eq_ignore_ascii_case("webm") {
+        media_demux::webm(bytes)?.video.ok_or("no video track")?
+    } else {
+        media_demux::mp4_video(bytes)?
+    };
+    let player =
+        VideoPlayer::with_preference(Arc::clone(bytes), track, media_hw::Preference::Software)?;
+    first_picture(player)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_poster_is_the_first_picture_and_stops_early() {
+        let (bytes, track) = long_track(100);
+        let player = VideoPlayer::from_decoder(
+            bytes,
+            track,
+            Decoder::Hardware(Box::new(FakeHardware::new(None))),
+        );
+        let poster = first_picture(player).expect("poster");
+        assert_eq!((poster.width, poster.height), (2, 2));
+        assert_eq!(poster.rgba.len(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn a_poster_decode_is_bounded_when_no_picture_comes() {
+        let (bytes, track) = long_track(POSTER_MAX_SAMPLES * 3);
+        let player = VideoPlayer::from_decoder(
+            bytes,
+            track,
+            Decoder::Hardware(Box::new(FakeHardware::new(Some(0)))),
+        );
+        assert!(first_picture(player).is_err());
+    }
+
+    #[test]
+    fn a_video_without_pictures_has_no_poster() {
+        let (bytes, track) = garbage_track(VideoCodec::H264);
+        let player = VideoPlayer::new(bytes, track).expect("player");
+        assert!(first_picture(player).is_err());
+    }
+
+    #[test]
+    fn files_that_are_not_video_have_no_poster() {
+        let bytes: Arc<[u8]> = Arc::from(vec![0u8; 64]);
+        assert!(poster_frame(&bytes, "mp4").is_err());
+        assert!(poster_frame(&bytes, "webm").is_err());
+    }
 
     fn gray(width: usize, height: usize, luma: u8) -> Planar {
         Planar {
