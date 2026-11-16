@@ -130,6 +130,15 @@ Windows, macOS e Linux, con un'uscita audio reale.
 Esito: queste prove richiedono un dispositivo audio reale e non girano in CI.
 Nessun risultato è stato consegnato finora: la causa resta non confermata.
 
+Tabella dei risultati. Aggiungere una riga per ogni prova fatta su un
+computer reale, con i valori letti dalla riga `media playback:` (stesso file,
+una volta con la decodifica hardware e una con `CORDIALE_VIDEO_DECODE=software`).
+Non inserire righe senza una prova reale.
+
+| Sistema | Uscita audio | File (contenitore, video, audio) | Decodifica | `audio=` | `decoder=` | `audio_underruns` | Suono udito |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| _nessuna prova ancora_ | | | | | | | |
+
 ## Prova della scelta dell'uscita audio (issue 830)
 
 Prova a mano da ripetere su Windows, macOS e Linux, meglio con un computer che
