@@ -2224,8 +2224,8 @@ export component AppWindow inherits Window {
     // Audio output for radio and media (`Settings.audio_output`). The list
     // is read again each time Settings > General opens; entry 0 is the host
     // default. `pref-audio-output-index` is the choice that is not applied
-    // yet. `audio-output-status` is "", "missing", "list-failed" or
-    // "applied".
+    // yet. `audio-output-status` is "", "missing", "list-failed", "applied"
+    // or "not-moved" (the active sound stays on the old output).
     in property <[string]> audio-output-names: [];
     in-out property <int> pref-audio-output-index: 0;
     in property <string> audio-output-status: "";
@@ -6992,6 +6992,8 @@ export component AppWindow inherits Window {
                             ? @tr("The saved audio output is not available. Cordiale uses the host default.")
                             : audio-output-status == "list-failed"
                             ? @tr("Cordiale cannot list the audio outputs. It uses the host default.")
+                            : audio-output-status == "not-moved"
+                            ? @tr("The sound that plays now could not move to the new audio output. New playback uses it.")
                             : @tr("Audio output applied.");
                         wrap: word-wrap;
                         color: palette-muted;

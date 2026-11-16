@@ -28,7 +28,7 @@ Alla chiusura di ogni file il lettore scrive una riga nel registro
 dell'applicazione:
 
 ```
-media playback: decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg=2.1ms decode_max=9.0ms convert_max=4.0ms audio_underruns=0
+media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg=2.1ms decode_max=9.0ms convert_max=4.0ms audio_underruns=0
 ```
 
 | Campo | Significato |
@@ -40,6 +40,7 @@ media playback: decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg
 | `starved` | volte in cui la coda si è svuotata durante la riproduzione |
 | `decode_avg`, `decode_max` | tempo di decodifica di un campione |
 | `convert_max` | tempo massimo della conversione colore di un'immagine |
+| `audio` | stato del suono all'apertura: `playing` (suono su un'uscita aperta), `no_output` (il file ha un suono ma nessuna uscita è aperta: parte muto), `no_track` (nessuna traccia audio, o traccia che non si apre) |
 | `audio_underruns` | volte in cui l'uscita audio ha trovato la coda vuota (un vuoto nel suono); l'attesa all'inizio e dopo uno spostamento non conta |
 
 Come leggerle: `starved` alto con `decode_max` oltre il tempo di fotogramma
@@ -119,13 +120,39 @@ Windows, macOS e Linux, con un'uscita audio reale.
 4. Il video senza traccia audio non deve scrivere errori audio.
 5. Riprodurre lo stesso video due volte, con la decodifica hardware accesa e
    con `CORDIALE_VIDEO_DECODE=software`. Confrontare il suono e la riga
-   `media playback:` (`decoder`, `audio_underruns`). Se il suono è uguale e
+   `media playback:` (`audio`, `decoder`, `audio_underruns`). `audio=no_output`
+   con un video che ha un suono indica l'uscita come causa; `audio=no_track`
+   con una traccia presente indica il decodificatore. Se il suono è uguale e
    `audio_underruns` è uguale, la decodifica hardware non è la causa.
 6. Controllare audio e video allineati dopo play, pausa, ripresa e
    spostamento.
 
 Esito: queste prove richiedono un dispositivo audio reale e non girano in CI.
 Nessun risultato è stato consegnato finora: la causa resta non confermata.
+
+## Prova della scelta dell'uscita audio (issue 830)
+
+Prova a mano da ripetere su Windows, macOS e Linux, meglio con un computer che
+ha più uscite audio. Radio, file audio e audio dei video usano la stessa
+uscita.
+
+1. Aprire Impostazioni > Generale. La sezione `Uscita audio` sta prima di
+   `Upload`. L'elenco ha solo uscite, nessun microfono; la prima voce è
+   l'uscita predefinita del sistema.
+2. Avviare una radio e scegliere un'altra uscita senza premere `Applica`: il
+   suono resta sull'uscita di prima.
+3. Premere `Applica`: la radio passa alla nuova uscita con la stessa stazione e
+   lo stesso volume.
+4. Aprire un file audio e un video con audio, scegliere un'altra uscita e
+   premere `Applica`: posizione, pausa e volume restano.
+5. Riavviare Cordiale: la scelta resta selezionata.
+6. Scollegare l'uscita scelta e riaprire la scheda: compare l'avviso che
+   l'uscita non c'è e il suono va sull'uscita predefinita.
+7. Se l'uscita nuova non si apre, il suono in corso resta sulla vecchia uscita
+   e sotto l'elenco compare l'avviso che non ha potuto passare alla nuova.
+
+Esito: queste prove richiedono dispositivi audio reali e non girano in CI.
+Nessun risultato è stato consegnato finora.
 
 ## Build per i tester
 

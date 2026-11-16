@@ -78,6 +78,8 @@ pub enum MediaEvent {
     Ended,
     /// The file can't be opened, decoded or played.
     Failed(String),
+    /// The new output did not open: the sound goes on the old output.
+    OutputNotMoved(String),
 }
 
 enum Command {
@@ -221,11 +223,27 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 }
             }
             Ok(Command::Reopen) => {
-                device = None;
-                if let Some(open) = session.as_mut().filter(|open| !open.ended) {
-                    ensure_device(&mut device);
-                    if let Err(reason) = open.move_output(volume, device.as_ref()) {
-                        on_event(open.generation, MediaEvent::Failed(reason));
+                let moving = session
+                    .as_ref()
+                    .is_some_and(|open| !open.ended && open.audio.is_some());
+                let mut next = None;
+                ensure_device(&mut next);
+                if next.is_none() && moving {
+                    // The old output keeps the sound; the next file opens
+                    // the selected output again.
+                    if let Some(open) = session.as_ref() {
+                        on_event(
+                            open.generation,
+                            MediaEvent::OutputNotMoved("no audio output".to_string()),
+                        );
+                    }
+                } else {
+                    device = next;
+                    if let Some(open) = session.as_mut().filter(|open| !open.ended) {
+                        if let Err(reason) = open.move_output(volume, device.as_ref()) {
+                            on_event(open.generation, MediaEvent::OutputNotMoved(reason.clone()));
+                            on_event(open.generation, MediaEvent::Failed(reason));
+                        }
                     }
                 }
             }
@@ -299,6 +317,8 @@ struct Session {
     audio: Option<rodio::Player>,
     /// Under-runs of the audio output, shared with the sound source.
     audio_stats: Option<Arc<AudioStats>>,
+    /// What the sound did at the start: one of the `AUDIO_*` words.
+    audio_state: &'static str,
     /// The sound still plays and is the clock. When it ends before the
     /// video, the wall clock goes on from `audio_at`.
     audio_live: bool,
@@ -334,6 +354,11 @@ impl Session {
             duration = duration.max(video.duration);
         }
         let mut audio_stats = None;
+        let audio_state = match (audio_source.is_some(), device.is_some()) {
+            (true, true) => AUDIO_PLAYING,
+            (true, false) => AUDIO_NO_OUTPUT,
+            (false, _) => AUDIO_NO_TRACK,
+        };
         let audio = match (audio_source, device) {
             (Some(source), Some(sink)) => {
                 let player = rodio::Player::connect_new(sink.mixer());
@@ -366,6 +391,7 @@ impl Session {
             audio_at: 0.0,
             audio,
             audio_stats,
+            audio_state,
             video,
             clock,
             paused: false,
@@ -565,9 +591,20 @@ fn audio_output_line(device: Option<&str>) -> String {
     )
 }
 
+/// The file has a sound and it plays on the open output.
+const AUDIO_PLAYING: &str = "playing";
+/// The file has a sound, but no output is open: it plays without sound.
+const AUDIO_NO_OUTPUT: &str = "no_output";
+/// The file has no sound, or its audio track could not be opened.
+const AUDIO_NO_TRACK: &str = "no_track";
+
 /// The line for the log.
-fn playback_summary(video: Option<&VideoStats>, underruns: Option<u64>) -> String {
-    let mut line = "media playback:".to_string();
+fn playback_summary(
+    video: Option<&VideoStats>,
+    underruns: Option<u64>,
+    audio_state: &str,
+) -> String {
+    let mut line = format!("media playback: audio={audio_state}");
     if let Some(video) = video {
         let average = video
             .decode_total
@@ -600,7 +637,11 @@ impl Drop for Session {
             .map(|stats| stats.underruns.load(Ordering::Relaxed));
         let video = self.video.as_ref().map(|video| &video.stats);
         if video.is_some() || underruns.is_some() {
-            cordiale_core::persistence::log_line(&playback_summary(video, underruns));
+            cordiale_core::persistence::log_line(&playback_summary(
+                video,
+                underruns,
+                self.audio_state,
+            ));
         }
     }
 }
@@ -685,6 +726,9 @@ fn apply(ui: &AppWindow, generation: u64, event: MediaEvent) {
             ui.set_media_image(slint::Image::from_rgba8(buffer));
         }
         MediaEvent::Ended => ui.set_media_playing(false),
+        MediaEvent::OutputNotMoved(_) => {
+            ui.set_audio_output_status(crate::audio_output::NOT_MOVED_KEY.into());
+        }
         MediaEvent::Failed(reason) => {
             ui.set_media_error(reason.into());
             ui.set_media_kind("failed".into());
@@ -3164,10 +3208,10 @@ mod tests {
             decode_max: Duration::from_millis(5),
             convert_max: Duration::from_millis(7),
         };
-        let line = playback_summary(Some(&stats), Some(6));
+        let line = playback_summary(Some(&stats), Some(6), AUDIO_PLAYING);
         assert_eq!(
             line,
-            "media playback: decoder=VA-API shown=120 late=3 dropped=1 starved=2 \
+            "media playback: audio=playing decoder=VA-API shown=120 late=3 dropped=1 starved=2 \
              decode_avg=2.0ms decode_max=5.0ms convert_max=7.0ms audio_underruns=6"
         );
         let fallback = VideoStats {
@@ -3175,11 +3219,18 @@ mod tests {
             fell_back: true,
             ..VideoStats::default()
         };
-        assert!(playback_summary(Some(&fallback), None).contains("software (fallback)"));
+        assert!(playback_summary(Some(&fallback), None, AUDIO_NO_OUTPUT)
+            .contains("software (fallback)"));
         assert_eq!(
-            playback_summary(None, Some(0)),
-            "media playback: audio_underruns=0"
+            playback_summary(None, Some(0), AUDIO_PLAYING),
+            "media playback: audio=playing audio_underruns=0"
         );
+        // A video with a sound and no output, and a video with no sound,
+        // read differently in the log.
+        assert!(playback_summary(Some(&fallback), None, AUDIO_NO_OUTPUT)
+            .starts_with("media playback: audio=no_output decoder="));
+        assert!(playback_summary(Some(&fallback), None, AUDIO_NO_TRACK)
+            .starts_with("media playback: audio=no_track decoder="));
     }
 
     #[test]
