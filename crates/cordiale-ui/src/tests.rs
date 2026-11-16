@@ -17569,7 +17569,18 @@ fn links_result_opens_the_panel_without_changing_the_screen() {
 /// Lays `lines` out in the chat pane of a headless window and returns the
 /// content height of the pane after the layout settles.
 fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) -> f32 {
+    rendered_chat_layout(lines, theme, select_rows).0
+}
+
+/// Like `rendered_chat_height`, with the box (top and height) that each row
+/// reports, by row index.
+fn rendered_chat_layout(
+    lines: Vec<ChatLine>,
+    theme: &str,
+    select_rows: bool,
+) -> (f32, std::collections::BTreeMap<i32, (f32, f32)>) {
     let ui = AppWindow::new().unwrap();
+    let boxes = layout_trace::register_chat_layout_trace(&ui, false);
     ui.set_screen("connected".into());
     ui.set_has_selected_channel(true);
     ui.set_theme(theme.into());
@@ -17584,7 +17595,8 @@ fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) ->
         slint::platform::update_timers_and_animations();
         ui.window().take_snapshot().unwrap();
     }
-    ui.get_chat_content_height()
+    let rows = boxes.borrow().clone();
+    (ui.get_chat_content_height(), rows)
 }
 
 /// `count` rows of one date with the same text, as chat lines.
@@ -17736,5 +17748,143 @@ fn rendered_rows_keep_their_height_after_selection_and_theme_change() {
             (other - base).abs() <= 0.5,
             "{theme} theme, rows selected {select_rows}: {other} high, expected {base}"
         );
+    }
+}
+
+/// Messages of two dates in every row kind: plain, link, formatted, system
+/// event, action and a wrapped one. The second date starts at index 3, so
+/// the model has a date separator there.
+fn mixed_kind_rows() -> Vec<RenderedMessage> {
+    let long = "word ".repeat(120);
+    let kinds: [(&str, Option<&str>, bool, u32); 8] = [
+        ("hello world", Some("alice"), false, 15),
+        ("see https://example.org/a now", Some("bob"), false, 15),
+        (
+            "\x02bold\x02 and \x0304red\x03 text",
+            Some("carol"),
+            false,
+            15,
+        ),
+        ("alice joined the channel", None, true, 16),
+        ("waves", Some("alice"), true, 16),
+        (long.trim_end(), Some("bob"), false, 16),
+        ("hello again", Some("alice"), false, 16),
+        ("last one", Some("carol"), false, 16),
+    ];
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(index, (text, nick, italic, day))| RenderedMessage {
+            nick: nick.map(str::to_string),
+            text: text.to_string(),
+            italic: *italic,
+            ..dated_row(index as i64 + 1, (2026, 11, *day), (9, index as u32), false)
+        })
+        .collect()
+}
+
+#[test]
+fn chat_row_gaps_reports_only_a_distance_over_the_tolerance() {
+    use std::collections::BTreeMap;
+    let rows = BTreeMap::from([
+        (0, (0., 20.)),
+        (1, (20., 20.)),
+        (2, (50., 20.)),
+        (4, (90., 20.)),
+    ]);
+    // Row 1 ends at 40 and row 2 starts at 50. Row 3 is not built, so row 2
+    // has no neighbour to compare with.
+    assert_eq!(
+        layout_trace::chat_row_gaps(&rows, 0.5),
+        vec![layout_trace::RowGap { index: 1, gap: 10. }]
+    );
+    let overlap = BTreeMap::from([(0, (0., 20.)), (1, (15., 20.))]);
+    assert_eq!(layout_trace::chat_row_gaps(&overlap, 0.5)[0].gap, -5.);
+    assert!(layout_trace::chat_row_gaps(&overlap, 5.).is_empty());
+}
+
+#[test]
+fn layout_trace_keeps_only_the_rows_the_model_has() {
+    let mut rows = std::collections::BTreeMap::new();
+    for index in 0..4 {
+        layout_trace::record_row_box(&mut rows, index, (index as f32 * 10., 10.), 4);
+    }
+    layout_trace::record_row_box(&mut rows, 0, (0., 12.), 2);
+    assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(rows[&0], (0., 12.));
+    assert!(layout_trace::trace_enabled(Some("1")));
+    assert!(layout_trace::trace_enabled(Some(" true ")));
+    assert!(!layout_trace::trace_enabled(Some("0")));
+    assert!(!layout_trace::trace_enabled(None));
+}
+
+#[test]
+fn rendered_rows_follow_each_other_with_no_blank_band() {
+    set_headless_software_platform();
+    let lines = chat_lines_model(&mixed_kind_rows(), true);
+    assert_eq!(separator_positions(&lines), vec![3]);
+    let (content, boxes) = rendered_chat_layout(lines.clone(), "dark", false);
+    assert_eq!(
+        boxes.keys().copied().collect::<Vec<_>>(),
+        (0..lines.len() as i32).collect::<Vec<_>>(),
+        "every row reports its box"
+    );
+    // Each row starts where the row above it ends: no blank band between rows.
+    assert!(
+        layout_trace::chat_row_gaps(&boxes, 1.).is_empty(),
+        "{boxes:?}"
+    );
+    let (first_top, _) = boxes[&0];
+    assert!(first_top.abs() <= 1., "the first row starts at {first_top}");
+    let (last_top, last_height) = boxes[&(lines.len() as i32 - 1)];
+    assert!(
+        (content - (last_top + last_height)).abs() <= 1.5,
+        "the pane is {content} high, the last row ends at {}",
+        last_top + last_height
+    );
+    // A row of one line has the height of a plain row, whatever its kind.
+    let plain = boxes[&0].1;
+    assert!(plain > 0.);
+    for index in [1, 2, 4, 5, 6, 7, 8] {
+        let height = boxes[&index].1;
+        if index == 6 {
+            // The wrapped row is taller, with only the lines of its text.
+            assert!(height > plain && height <= plain * 16., "wrapped: {height}");
+        } else {
+            assert!(
+                (height - plain).abs() <= plain * 0.35 + 2.,
+                "row {index} is {height} high, a plain row is {plain}"
+            );
+        }
+    }
+    // The date separator is one line with its padding.
+    let separator = boxes[&3].1;
+    assert!(
+        separator > 0. && separator <= plain * 2. + 2.,
+        "{separator}"
+    );
+}
+
+#[test]
+fn rendered_row_boxes_do_not_change_with_selection_or_theme() {
+    set_headless_software_platform();
+    let rows = mixed_kind_rows();
+    let (_, base) = rendered_chat_layout(chat_lines_model(&rows, true), "dark", false);
+    assert!(!base.is_empty());
+    for (dark, theme, select_rows) in [
+        (true, "dark", true),
+        (false, "light", false),
+        (false, "light", true),
+    ] {
+        let (_, other) = rendered_chat_layout(chat_lines_model(&rows, dark), theme, select_rows);
+        assert_eq!(other.len(), base.len(), "{theme}, selected {select_rows}");
+        for (index, (top, height)) in &other {
+            let (base_top, base_height) = base[index];
+            assert!(
+                (top - base_top).abs() <= 0.5 && (height - base_height).abs() <= 0.5,
+                "row {index}, {theme} theme, selected {select_rows}: \
+                 ({top}, {height}) expected ({base_top}, {base_height})"
+            );
+        }
     }
 }
