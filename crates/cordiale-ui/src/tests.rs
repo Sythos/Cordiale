@@ -29,6 +29,53 @@ fn a_video_preview_needs_a_small_readable_video() {
 }
 
 #[test]
+fn a_video_preview_reads_real_mp4_mov_m4v_and_webm_files() {
+    let dir = tempfile::tempdir().expect("test folder");
+    let (width, height) = media_fixtures::PICTURE_SIZE;
+    let mp4 = media_fixtures::mp4_h264();
+    for name in ["clip.mp4", "clip.mov", "clip.m4v"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &mp4).expect("write");
+        let (w, h, rgba) = video_preview_pixels(&path).expect(name);
+        // The ratio of the picture stays, and the thumbnail fits the bounds.
+        assert_eq!(w * height, h * width, "{name}");
+        assert!(w <= 640 && h <= 360, "{name}");
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // The left of the picture is darker than its right.
+        let row = w as usize * 4;
+        assert!(rgba[0] < rgba[row - 4], "{name}");
+    }
+    let path = dir.path().join("clip.webm");
+    std::fs::write(&path, media_fixtures::webm_vp8()).expect("write");
+    let (w, h, rgba) = video_preview_pixels(&path).expect("webm");
+    assert_eq!(w * height, h * width);
+    assert!(w <= 640 && h <= 360);
+    assert_eq!(rgba.len(), (w * h * 4) as usize);
+}
+
+#[test]
+fn a_video_preview_refuses_a_file_over_the_size_limit() {
+    assert_eq!(PREVIEW_VIDEO_MAX_BYTES, 256 * 1024 * 1024);
+    assert!(video_preview_fits(0));
+    assert!(video_preview_fits(PREVIEW_VIDEO_MAX_BYTES));
+    assert!(!video_preview_fits(PREVIEW_VIDEO_MAX_BYTES + 1));
+    assert!(!video_preview_fits(u64::MAX));
+}
+
+#[test]
+fn a_video_preview_refuses_a_video_that_is_cut_short() {
+    let dir = tempfile::tempdir().expect("test folder");
+    let mp4 = media_fixtures::mp4_h264();
+    let path = dir.path().join("cut.mp4");
+    std::fs::write(&path, &mp4[..mp4.len() - 200]).expect("write");
+    assert!(video_preview_pixels(&path).is_none());
+    // A file with no extension has no known container.
+    let bare = dir.path().join("clip");
+    std::fs::write(&bare, &mp4).expect("write");
+    assert!(video_preview_pixels(&bare).is_none());
+}
+
+#[test]
 fn services_console_captures_only_fresh_notices_from_its_service() {
     let console = ServiceConsoleState {
         network: "libera".into(),
