@@ -1277,7 +1277,41 @@ pub(crate) fn register_composer_callbacks(
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
         if let Some(ui) = weak_for_picker.upgrade() {
             update_command_picker(&ui, &usage_for_picker.borrow(), text.as_str());
+            update_emoji_suggestions(&ui, text.as_str());
         }
+    });
+
+    // The emoji edits are pure: the draft goes in, the new draft comes out.
+    // The caret is the end of the draft, as in nick completion.
+    ui.on_emoji_complete(|text, glyph| {
+        let caret = text.len();
+        match emoji_picker::replace_active_shortcode(text.as_str(), caret, glyph.as_str()) {
+            Some((new_text, _)) => new_text.into(),
+            None => text,
+        }
+    });
+    ui.on_emoji_insert(|text, glyph| {
+        let caret = text.len();
+        emoji_picker::insert_at(text.as_str(), caret, glyph.as_str())
+            .0
+            .into()
+    });
+    ui.on_emoji_grid(|category, query| {
+        let emoji = if query.trim().is_empty() {
+            let category = usize::try_from(category).unwrap_or(0);
+            emoji_picker::category_emojis(category.min(emoji_picker::CATEGORY_COUNT - 1))
+        } else {
+            emoji_picker::search(query.as_str(), emoji_picker::SEARCH_LIMIT, true)
+        };
+        slint::ModelRc::new(slint::VecModel::from(
+            emoji
+                .into_iter()
+                .map(|emoji| EmojiItem {
+                    glyph: emoji.as_str().into(),
+                    label: emoji_picker::label(emoji).into(),
+                })
+                .collect::<Vec<_>>(),
+        ))
     });
 
     let tx_for_reply = worker_tx.clone();
@@ -1339,6 +1373,23 @@ fn update_command_picker(ui: &AppWindow, usage: &command_usage::CommandUsage, te
     ui.set_command_picker_open(!suggestions.is_empty());
     ui.set_command_picker_index(0);
     ui.set_command_suggestions(slint::ModelRc::new(slint::VecModel::from(suggestions)));
+}
+
+/// Opens, filters or closes the `:shortcode` list for the text the user just
+/// typed. The caret is the end of the draft. The list remembers the draft it
+/// was made for, so a draft changed from code hides it.
+fn update_emoji_suggestions(ui: &AppWindow, text: &str) {
+    let items: Vec<EmojiItem> = emoji_picker::suggestions(text, text.len())
+        .into_iter()
+        .map(|emoji| EmojiItem {
+            glyph: emoji.as_str().into(),
+            label: emoji_picker::label(emoji).into(),
+        })
+        .collect();
+    ui.set_emoji_suggest_open(!items.is_empty());
+    ui.set_emoji_suggest_index(0);
+    ui.set_emoji_suggest_for(text.into());
+    ui.set_emoji_suggestions(slint::ModelRc::new(slint::VecModel::from(items)));
 }
 
 /// Theme toggle, the taskbar badge, color themes and the theme editor.

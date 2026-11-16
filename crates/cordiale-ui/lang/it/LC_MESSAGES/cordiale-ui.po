@@ -4143,3 +4143,55 @@ msgstr "Impossibile leggere gli indirizzi di origine."
 msgctxt "AppWindow"
 msgid "The source addresses could not be read (error {})."
 msgstr "Impossibile leggere gli indirizzi di origine (errore {})."
+
+msgctxt "AppWindow"
+msgid "Emoji suggestions"
+msgstr "Suggerimenti emoji"
+
+msgctxt "AppWindow"
+msgid "Faces and people"
+msgstr "Facce e persone"
+
+msgctxt "AppWindow"
+msgid "Animals and nature"
+msgstr "Animali e natura"
+
+msgctxt "AppWindow"
+msgid "Food and drink"
+msgstr "Cibo e bevande"
+
+msgctxt "AppWindow"
+msgid "Travel and places"
+msgstr "Viaggi e luoghi"
+
+msgctxt "AppWindow"
+msgid "Activities"
+msgstr "Attività"
+
+msgctxt "AppWindow"
+msgid "Objects"
+msgstr "Oggetti"
+
+msgctxt "AppWindow"
+msgid "Symbols"
+msgstr "Simboli"
+
+msgctxt "AppWindow"
+msgid "Flags"
+msgstr "Bandiere"
+
+msgctxt "AppWindow"
+msgid "Emoji"
+msgstr "Emoji"
+
+msgctxt "AppWindow"
+msgid "Search emoji"
+msgstr "Cerca emoji"
+
+msgctxt "AppWindow"
+msgid "Search results"
+msgstr "Risultati della ricerca"
+
+msgctxt "AppWindow"
+msgid "No emoji found"
+msgstr "Nessuna emoji trovata"

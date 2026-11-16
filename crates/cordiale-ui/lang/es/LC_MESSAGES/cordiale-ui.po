@@ -4143,3 +4143,55 @@ msgstr "No se pudieron leer las direcciones de origen."
 msgctxt "AppWindow"
 msgid "The source addresses could not be read (error {})."
 msgstr "No se pudieron leer las direcciones de origen (error {})."
+
+msgctxt "AppWindow"
+msgid "Emoji suggestions"
+msgstr "Sugerencias de emoji"
+
+msgctxt "AppWindow"
+msgid "Faces and people"
+msgstr "Caras y personas"
+
+msgctxt "AppWindow"
+msgid "Animals and nature"
+msgstr "Animales y naturaleza"
+
+msgctxt "AppWindow"
+msgid "Food and drink"
+msgstr "Comida y bebida"
+
+msgctxt "AppWindow"
+msgid "Travel and places"
+msgstr "Viajes y lugares"
+
+msgctxt "AppWindow"
+msgid "Activities"
+msgstr "Actividades"
+
+msgctxt "AppWindow"
+msgid "Objects"
+msgstr "Objetos"
+
+msgctxt "AppWindow"
+msgid "Symbols"
+msgstr "Símbolos"
+
+msgctxt "AppWindow"
+msgid "Flags"
+msgstr "Banderas"
+
+msgctxt "AppWindow"
+msgid "Emoji"
+msgstr "Emoji"
+
+msgctxt "AppWindow"
+msgid "Search emoji"
+msgstr "Buscar emoji"
+
+msgctxt "AppWindow"
+msgid "Search results"
+msgstr "Resultados de la búsqueda"
+
+msgctxt "AppWindow"
+msgid "No emoji found"
+msgstr "No se encontró ningún emoji"

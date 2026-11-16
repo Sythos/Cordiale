@@ -37,6 +37,7 @@ mod debug_info;
 mod e2e_files;
 mod e2e_runtime;
 mod e2e_view;
+mod emoji_picker;
 mod frames;
 mod history;
 mod home;
