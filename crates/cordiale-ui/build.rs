@@ -74,7 +74,9 @@ fn main() {
                 .set_icon(icon_path)
                 .compile()
                 .expect("failed to embed the Windows icon resource");
-        } else {
+        } else if std::env::var("PROFILE").as_deref() == Ok("release") {
+            // Only release builds are packaged, so only they report the gap.
+            // Debug builds (ci.yml) never have the .ico and stay quiet.
             println!("cargo:warning=cordiale.ico not found, building without an embedded icon");
         }
     }
