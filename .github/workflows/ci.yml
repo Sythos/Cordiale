@@ -49,9 +49,16 @@ jobs:
         with:
           tool: cargo-audit
 
+      # RUSTSEC-2024-0436 is an "unmaintained" notice for paste 1.0.15, a
+      # proc-macro that runs at build time only. The only path is cordiale-ui ->
+      # rusty_av1d 1.3.0 -> paste. rusty_av1d 1.3.0 is the latest release, so
+      # Cordiale cannot replace paste (the advisory names pastey as a fork)
+      # without a new rusty_av1d release or a different AV1 decoder. The ignore
+      # covers this one identifier. The other ignores are in .cargo/audit.toml.
+      # Remove the flag when rusty_av1d drops paste or moves to pastey.
       - name: Audit dependencies (RustSec advisory DB)
         if: runner.os == 'Linux'
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2024-0436
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
@@ -293,6 +300,11 @@ jobs:
           brew list --versions pkgconf > /dev/null || brew install pkgconf
           brew install ffmpeg
 
+      # A macOS test link can print "__eh_frame section too large (max 16MB)
+      # ... compact unwind table". The linker then uses the slower DWARF lookup
+      # when it unwinds an exception. The tests pass. The warning is about the
+      # debug test binary only: the release binary is a separate link (lto,
+      # strip). The exact object files are not traced. Keep the warning visible.
       - name: Lint with Clippy (hw-decode)
         run: cargo clippy --package cordiale-ui --all-targets --features hw-decode -- -D warnings
 
