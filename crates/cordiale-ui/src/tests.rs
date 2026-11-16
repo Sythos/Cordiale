@@ -9655,6 +9655,26 @@ fn a_video_that_was_not_shrunk_is_reported_and_never_uploaded_as_is() {
     assert_eq!(shrink_error_status(&ShrinkError::Cancelled), None);
 }
 
+/// The seek bar track and fill must start at the left edge (x = 0) and
+/// the fill width must use the same fraction as the marker position.
+#[test]
+fn seek_bar_fill_starts_at_left_edge_with_marker_fraction() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let bar = slint
+        .split("property <float> fraction: scrub >= 0")
+        .nth(1)
+        .and_then(|rest| rest.split("TouchArea {").next())
+        .expect("seek bar block");
+    let rects: Vec<&str> = bar.split("Rectangle {").skip(1).collect();
+    assert_eq!(rects.len(), 3, "track, fill and marker");
+    for track in &rects[..2] {
+        assert!(track.contains("x: 0px;"), "track and fill start at x = 0");
+    }
+    assert!(rects[0].contains("width: parent.width;"));
+    assert!(rects[1].contains("width: parent.width * parent.fraction;"));
+    assert!(rects[2].contains("x: parent.width * parent.fraction - 6px;"));
+}
+
 /// A 507 can't say whether the instance or the subject's own cap is out
 /// of space (protocol v26), so its copy must not blame the server, in
 /// the UI or in any catalog.
