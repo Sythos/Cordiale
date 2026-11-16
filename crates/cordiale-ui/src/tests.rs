@@ -3,6 +3,33 @@ use super::*;
 use cordiale_core::slash::SlashCommand;
 
 #[test]
+fn a_late_video_preview_is_dropped() {
+    let path = std::path::Path::new("clip.mp4");
+    let other = std::path::Path::new("other.mp4");
+    // The same confirmation and the same file: the poster shows.
+    assert!(preview_is_current(Some(path), path, 3, 3));
+    // A newer confirmation or a cancel moved the number on.
+    assert!(!preview_is_current(Some(path), path, 3, 4));
+    // A different file is pending now.
+    assert!(!preview_is_current(Some(other), path, 3, 3));
+    // Nothing is pending: the dialog is closed.
+    assert!(!preview_is_current(None, path, 3, 3));
+    let first = next_preview_generation();
+    assert_ne!(first, next_preview_generation());
+}
+
+#[test]
+fn a_video_preview_needs_a_small_readable_video() {
+    let dir = temp_files::private_subdir().expect("private dir");
+    let missing = dir.join("missing-video.mp4");
+    assert!(video_preview_pixels(&missing).is_none());
+    let corrupt = dir.join("corrupt-video.webm");
+    std::fs::write(&corrupt, [0u8; 64]).expect("write");
+    assert!(video_preview_pixels(&corrupt).is_none());
+    let _ = std::fs::remove_file(&corrupt);
+}
+
+#[test]
 fn services_console_captures_only_fresh_notices_from_its_service() {
     let console = ServiceConsoleState {
         network: "libera".into(),
