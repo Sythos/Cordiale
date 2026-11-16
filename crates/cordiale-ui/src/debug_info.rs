@@ -136,7 +136,7 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
 
 /// The default output device and audio host, read from the backend the
 /// player uses. `None` when the system reports no default device.
-fn default_audio_output() -> Option<String> {
+pub(crate) fn default_audio_output() -> Option<String> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
     let host = rodio::cpal::default_host();
