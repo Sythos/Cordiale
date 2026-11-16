@@ -17565,3 +17565,176 @@ fn links_result_opens_the_panel_without_changing_the_screen() {
     assert_eq!(ui.get_screen(), "connected");
     assert!(ui.get_has_selected_channel());
 }
+
+/// Lays `lines` out in the chat pane of a headless window and returns the
+/// content height of the pane after the layout settles.
+fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) -> f32 {
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_theme(theme.into());
+    if select_rows {
+        ui.set_chat_sel_anchor(0);
+        ui.set_chat_sel_focus(lines.len() as i32 - 1);
+    }
+    ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1000., 700.));
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().unwrap();
+    }
+    ui.get_chat_content_height()
+}
+
+/// `count` rows of one date with the same text, as chat lines.
+fn same_date_lines(count: usize, text: &str, nick: Option<&str>, italic: bool) -> Vec<ChatLine> {
+    let rows: Vec<RenderedMessage> = (0..count)
+        .map(|index| RenderedMessage {
+            nick: nick.map(str::to_string),
+            text: text.to_string(),
+            italic,
+            ..dated_row(index as i64 + 1, (2026, 11, 16), (9, index as u32), false)
+        })
+        .collect();
+    let lines = chat_lines_model(&rows, true);
+    assert_eq!(lines.len(), count, "one chat row for each message");
+    lines
+}
+
+/// The height one more row adds to the pane, measured from a rendered window.
+/// It also checks that the rows add the same height each: a blank band in
+/// some rows only would break the straight line of the heights.
+fn rendered_row_height(text: &str, nick: Option<&str>, italic: bool) -> f32 {
+    let height_of =
+        |count| rendered_chat_height(same_date_lines(count, text, nick, italic), "dark", false);
+    let (one, two, four, eight) = (height_of(1), height_of(2), height_of(4), height_of(8));
+    assert!(one > 0., "the chat pane has no height for {text:?}");
+    let step = (eight - one) / 7.;
+    assert!(step > 0., "rows add no height for {text:?}");
+    for (count, height) in [(2., two), (4., four)] {
+        let expected = one + step * (count - 1.);
+        assert!(
+            (height - expected).abs() <= 1.5,
+            "{count} rows of {text:?} are {height} high, expected {expected}"
+        );
+    }
+    step
+}
+
+#[test]
+fn rendered_one_line_rows_have_the_same_normal_spacing() {
+    set_headless_software_platform();
+    let plain = rendered_row_height("hello world", Some("alice"), false);
+    let kinds: [(&str, &str, Option<&str>, bool); 4] = [
+        (
+            "link",
+            "see https://example.org/a now",
+            Some("alice"),
+            false,
+        ),
+        (
+            "formatted",
+            "\x02bold\x02 and \x0304red\x03 text",
+            Some("alice"),
+            false,
+        ),
+        ("system event", "alice joined the channel", None, true),
+        ("action", "waves", Some("alice"), true),
+    ];
+    for (name, text, nick, italic) in kinds {
+        let step = rendered_row_height(text, nick, italic);
+        // A blank band is a whole line or more: it never fits in this range.
+        assert!(
+            (step - plain).abs() <= plain * 0.35 + 2.,
+            "{name} row is {step} high, a plain row is {plain}"
+        );
+    }
+}
+
+#[test]
+fn rendered_wrapped_row_has_only_the_lines_of_its_text() {
+    set_headless_software_platform();
+    let plain = rendered_row_height("hello world", Some("alice"), false);
+    let long = "word ".repeat(200);
+    let wrapped = rendered_row_height(&long, Some("alice"), false);
+    assert!(wrapped > plain, "a wrapped row is taller than a plain row");
+    // 1000 characters at the narrowest plausible width of the pane (a
+    // quarter of the window, 250 logical pixels, 4 pixels each) is 16 lines.
+    assert!(
+        wrapped <= plain * 16.,
+        "wrapped row is {wrapped} high, a plain row is {plain}"
+    );
+    let long_link = format!(
+        "{} https://example.org/a {}",
+        "word ".repeat(100),
+        "end ".repeat(50)
+    );
+    let linked = rendered_row_height(&long_link, Some("alice"), false);
+    assert!(linked > plain);
+    assert!(
+        linked <= plain * 16.,
+        "wrapped link row is {linked} high, a plain row is {plain}"
+    );
+}
+
+#[test]
+fn rendered_date_separator_adds_one_row_with_no_blank_band() {
+    set_headless_software_platform();
+    let plain = rendered_row_height("hello world", Some("alice"), false);
+    let row = |id, day, minute| RenderedMessage {
+        nick: Some("alice".to_string()),
+        text: "hello world".to_string(),
+        ..dated_row(id, (2026, 11, day), (9, minute), false)
+    };
+    let same_day = chat_lines_model(&[row(1, 16, 0), row(2, 16, 1), row(3, 16, 2)], true);
+    let two_days = chat_lines_model(&[row(1, 15, 0), row(2, 16, 1), row(3, 16, 2)], true);
+    assert_eq!(separator_positions(&same_day), Vec::<usize>::new());
+    assert_eq!(separator_positions(&two_days), vec![1]);
+    let flat = rendered_chat_height(same_day, "dark", false);
+    let separated = rendered_chat_height(two_days, "dark", false);
+    let extra = separated - flat;
+    // The separator is one text line with its padding: more than nothing and
+    // less than two plain rows.
+    assert!(extra > 0., "the separator row has no height");
+    assert!(
+        extra <= plain * 2. + 2.,
+        "the separator adds {extra}, a plain row is {plain}"
+    );
+}
+
+#[test]
+fn rendered_rows_keep_their_height_after_selection_and_theme_change() {
+    set_headless_software_platform();
+    let rows: Vec<RenderedMessage> = [
+        ("hello world", Some("alice"), false),
+        ("see https://example.org/a now", Some("bob"), false),
+        ("\x02bold\x02 and \x0304red\x03", Some("carol"), false),
+        ("alice joined the channel", None, true),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, (text, nick, italic))| RenderedMessage {
+        nick: nick.map(str::to_string),
+        text: text.to_string(),
+        italic: *italic,
+        ..dated_row(index as i64 + 1, (2026, 11, 16), (9, index as u32), false)
+    })
+    .collect();
+    let height = |dark: bool, theme: &str, select_rows: bool| {
+        rendered_chat_height(chat_lines_model(&rows, dark), theme, select_rows)
+    };
+    let base = height(true, "dark", false);
+    assert!(base > 0.);
+    for (dark, theme, select_rows) in [
+        (true, "dark", true),
+        (false, "light", false),
+        (false, "light", true),
+    ] {
+        let other = height(dark, theme, select_rows);
+        assert!(
+            (other - base).abs() <= 0.5,
+            "{theme} theme, rows selected {select_rows}: {other} high, expected {base}"
+        );
+    }
+}
