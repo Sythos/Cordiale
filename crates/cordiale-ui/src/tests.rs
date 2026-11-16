@@ -17573,16 +17573,28 @@ fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) ->
     ui.set_screen("connected".into());
     ui.set_has_selected_channel(true);
     ui.set_theme(theme.into());
-    if select_rows {
-        ui.set_chat_sel_anchor(0);
-        ui.set_chat_sel_focus(lines.len() as i32 - 1);
-    }
+    let last_row = lines.len() as i32 - 1;
     ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
     ui.show().unwrap();
     ui.window().set_size(slint::LogicalSize::new(1000., 700.));
-    for _ in 0..3 {
-        slint::platform::update_timers_and_animations();
-        ui.window().take_snapshot().unwrap();
+    let settle = || {
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            ui.window().take_snapshot().unwrap();
+        }
+    };
+    settle();
+    if select_rows {
+        // The first layout clears any selection (the pane asks for older
+        // history when its rows fit), so select after it has settled.
+        ui.set_chat_sel_anchor(0);
+        ui.set_chat_sel_focus(last_row);
+        settle();
+        assert_eq!(
+            (ui.get_chat_sel_anchor(), ui.get_chat_sel_focus()),
+            (0, last_row),
+            "the row selection must stay active while the height is measured"
+        );
     }
     ui.get_chat_content_height()
 }
