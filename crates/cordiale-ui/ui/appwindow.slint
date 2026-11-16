@@ -1791,6 +1791,9 @@ export component AppWindow inherits Window {
     private property <string> chat-pane-label: "";
     private property <bool> chat-resume: false;
     callback chat-resume-requested() -> bool;
+    // The measured box of a chat row, in the content of the pane: the row
+    // index, its top and its height. Rust reads it for the layout trace.
+    callback chat-row-laid-out(int, length, length);
     callback chat-resume-landed();
     // PgUp/PgDown in the compose box page the chat pane: the direction
     // (-1 up, 1 down) and a counter bumped on every press.
@@ -5504,6 +5507,16 @@ export component AppWindow inherits Window {
                     // the right like Cicchetto's `overflow-x: clip`, instead
                     // of making the `ListView` scroll sideways.
                     clip: true;
+
+                    // Report the box of the row each time the layout moves
+                    // or resizes it, and once when the row is built.
+                    property <int> laid-index: line-index;
+                    property <length> laid-top: self.y;
+                    property <length> laid-height: self.height;
+                    init => { chat-row-laid-out(line-index, self.y, self.height); }
+                    changed laid-index => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }
+                    changed laid-top => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }
+                    changed laid-height => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }
 
                     // Cicchetto's flat mention background; the row a
                     // mention jump landed on is tinted over it.

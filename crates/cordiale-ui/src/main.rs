@@ -45,6 +45,7 @@ mod home;
 mod input_history;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
+mod layout_trace;
 mod link_hover;
 mod media_demux;
 #[cfg(test)]
@@ -745,6 +746,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let input_history = Rc::new(RefCell::new(input_history::InputHistory::default()));
     let command_usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
     register_navigation_callbacks(&ui, &worker_tx, &input_history, &command_usage);
+    // The chat rows report their boxes only when the trace is on.
+    if layout_trace::trace_enabled(std::env::var("CORDIALE_LAYOUT_TRACE").ok().as_deref()) {
+        let _ = layout_trace::register_chat_layout_trace(&ui, true);
+    }
     register_member_callbacks(&ui, &worker_tx);
     register_channel_callbacks(&ui, &worker_tx);
     register_directory_callbacks(&ui, &worker_tx);
@@ -11177,6 +11182,7 @@ fn with_chat_lines_model(ui: &AppWindow, mutate: impl FnOnce(&slint::VecModel<Ch
 /// `appwindow.slint`'s `chat-list.follow-bottom` logic hold the view
 /// steady instead of jumping (GitHub issue #89).
 fn show_chat_lines(ui: &AppWindow, lines: Vec<ChatLine>) {
+    layout_trace::invalidate_chat_rows();
     with_chat_lines_model(ui, |model| model.set_vec(lines));
 }
 
