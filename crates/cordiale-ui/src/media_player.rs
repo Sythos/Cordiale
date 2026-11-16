@@ -1143,7 +1143,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             }
             _ => None,
         })
-        .ok_or("no audio track")?;
+        .ok_or(NO_AUDIO_TRACK)?;
     let mut source = if params.codec == CODEC_ID_OPUS {
         let channels = params
             .channels
@@ -2052,6 +2052,8 @@ fn open_video(
         let total = media
             .duration_us
             .map(|us| Duration::from_micros(us.max(0) as u64));
+        let has_vorbis = media.vorbis.is_some();
+        let has_opus = media.audio.is_some();
         let vorbis = media
             .vorbis
             .and_then(|track| vorbis_source(bytes, track, total));
@@ -2076,12 +2078,15 @@ fn open_video(
             (first && source.refill()).then_some(source)
         });
         let audio = audio.or(vorbis);
+        if audio.is_none() && (has_opus || has_vorbis) {
+            cordiale_core::persistence::log_line("webm audio track could not be opened");
+        }
         return Ok((VideoPlayer::new(Arc::clone(bytes), track)?, audio));
     }
     let track = media_demux::mp4_video(bytes)?;
     let player = VideoPlayer::new(Arc::clone(bytes), track)?;
     // A file without a sound that the player decodes plays without sound.
-    let audio = symphonia_source(bytes, "mp4").ok();
+    let audio = audio_or_log(symphonia_source(bytes, "mp4"));
     Ok((player, audio))
 }
 
@@ -2126,6 +2131,31 @@ pub fn poster_frame(bytes: &Arc<[u8]>, extension: &str) -> Result<Poster, String
     first_picture(player)
 }
 
+/// The message `symphonia_source` gives when the file has no audio track.
+const NO_AUDIO_TRACK: &str = "no audio track";
+
+/// Whether an audio error is worth a log line: a file without an audio
+/// track is normal, any other error means a present track failed.
+fn audio_error_is_loggable(err: &str) -> bool {
+    err != NO_AUDIO_TRACK
+}
+
+/// The sound of a video, or `None`. A missing audio track stays silent in
+/// the log; a track that fails to open is logged.
+fn audio_or_log(result: Result<AudioSource, String>) -> Option<AudioSource> {
+    match result {
+        Ok(source) => Some(source),
+        Err(err) => {
+            if audio_error_is_loggable(&err) {
+                cordiale_core::persistence::log_line(&format!(
+                    "video audio track could not be opened: {err}"
+                ));
+            }
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2166,6 +2196,18 @@ mod tests {
         let bytes: Arc<[u8]> = Arc::from(vec![0u8; 64]);
         assert!(poster_frame(&bytes, "mp4").is_err());
         assert!(poster_frame(&bytes, "webm").is_err());
+    }
+
+    #[test]
+    fn a_missing_audio_track_is_not_logged() {
+        assert!(!audio_error_is_loggable(NO_AUDIO_TRACK));
+        assert!(audio_error_is_loggable("unsupported audio"));
+    }
+
+    #[test]
+    fn a_failed_audio_track_gives_no_source() {
+        assert!(audio_or_log(Err(NO_AUDIO_TRACK.to_string())).is_none());
+        assert!(audio_or_log(Err("unsupported audio".to_string())).is_none());
     }
 
     fn gray(width: usize, height: usize, luma: u8) -> Planar {
