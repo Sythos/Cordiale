@@ -17137,3 +17137,126 @@ fn compose_row_and_actions_row_stay_anchored_to_the_bottom() {
         .expect("spacer");
     assert_eq!(spacer.trim(), "vertical-stretch: 1;");
 }
+
+#[test]
+fn emoji_search_finds_common_aliases_first() {
+    let found = emoji_picker::search("smile", 8, false);
+    assert_eq!(found.first().map(|e| e.as_str()), Some("😄"));
+    let thumbs = emoji_picker::search("thumbsup", 8, false);
+    assert_eq!(thumbs.first().map(|e| e.as_str()), Some("👍"));
+    // A name word finds an emoji whose shortcode differs.
+    let by_name = emoji_picker::search("grinning face with smiling eyes", 8, false);
+    assert!(by_name.iter().any(|e| e.as_str() == "😄"));
+    assert!(emoji_picker::search("", 8, false).is_empty());
+    assert!(emoji_picker::search("qqqqzzzz", 8, false).is_empty());
+}
+
+#[test]
+fn emoji_search_adds_skin_tones_only_when_asked() {
+    let tones = emoji_picker::search("waving hand medium", 20, true);
+    assert!(tones.iter().any(|e| e.as_str() == "👋🏽"));
+    let plain = emoji_picker::search("waving hand medium", 20, false);
+    assert!(plain.is_empty());
+}
+
+#[test]
+fn emoji_picker_categories_are_filled() {
+    for category in 0..emoji_picker::CATEGORY_COUNT {
+        assert!(
+            !emoji_picker::category_emojis(category).is_empty(),
+            "category {category} is empty"
+        );
+    }
+    assert!(emoji_picker::category_emojis(emoji_picker::CATEGORY_COUNT).is_empty());
+    let flags = emoji_picker::category_emojis(7);
+    assert!(flags.iter().any(|e| e.as_str() == "🇮🇹"));
+    let faces = emoji_picker::category_emojis(0);
+    assert!(faces.iter().any(|e| e.as_str() == "😄"));
+    assert!(faces.iter().any(|e| e.as_str() == "👋"));
+}
+
+#[test]
+fn emoji_shortcode_opens_only_for_a_typed_shortcode() {
+    assert_eq!(
+        emoji_picker::active_shortcode(":smile", 6),
+        Some((0, "smile"))
+    );
+    assert_eq!(
+        emoji_picker::active_shortcode("hello :sm", 9),
+        Some((6, "sm"))
+    );
+    // The caret decides the term, not the rest of the draft.
+    assert_eq!(
+        emoji_picker::active_shortcode("hi :smi there", 7),
+        Some((3, "smi"))
+    );
+    for text in [
+        "12:30",
+        "meet at 12:30pm",
+        "http://example.org",
+        "see http:foo",
+        ":)",
+        ":-)",
+        ":D",
+        ":3",
+        ":",
+        "a :",
+        "/me :smile",
+        "word:smile",
+        ":smile:",
+        "::smile",
+    ] {
+        assert_eq!(
+            emoji_picker::active_shortcode(text, text.len()),
+            None,
+            "{text}"
+        );
+        assert!(emoji_picker::suggestions(text, text.len()).is_empty());
+    }
+}
+
+#[test]
+fn emoji_suggestions_filter_as_the_term_grows() {
+    let short = emoji_picker::suggestions(":sm", 3);
+    let long = emoji_picker::suggestions(":smile", 6);
+    assert!(!short.is_empty());
+    assert!(long.len() <= emoji_picker::SUGGESTION_LIMIT);
+    assert_eq!(long.first().map(|e| e.as_str()), Some("😄"));
+    assert!(emoji_picker::suggestions(":qqqqzzzz", 9).is_empty());
+}
+
+#[test]
+fn emoji_replace_keeps_the_text_around_the_shortcode() {
+    assert_eq!(
+        emoji_picker::replace_active_shortcode("say :smile", 10, "😄"),
+        Some(("say 😄".to_string(), "say 😄".len()))
+    );
+    let (text, caret) =
+        emoji_picker::replace_active_shortcode("say :smi now", 8, "😄").expect("active");
+    assert_eq!(text, "say 😄 now");
+    assert_eq!(&text[caret..], " now");
+    // No active shortcode: nothing is replaced.
+    assert_eq!(
+        emoji_picker::replace_active_shortcode("12:30", 5, "😄"),
+        None
+    );
+    // Only the shortcode at the caret changes, not an earlier match.
+    let (text, _) =
+        emoji_picker::replace_active_shortcode(":smile and :smile", 17, "😄").expect("active");
+    assert_eq!(text, ":smile and 😄");
+}
+
+#[test]
+fn emoji_insert_keeps_sequences_whole_and_the_caret_on_a_boundary() {
+    let family = "👨\u{200d}👩\u{200d}👧";
+    let (text, caret) = emoji_picker::insert_at("ab", 1, family);
+    assert_eq!(text, format!("a{family}b"));
+    assert_eq!(caret, 1 + family.len());
+    // A caret inside a multi-byte character moves back to its start.
+    let (text, _) = emoji_picker::insert_at("é!", 1, "😄");
+    assert_eq!(text, "😄é!");
+    // A caret past the end appends.
+    let (text, caret) = emoji_picker::insert_at("hi", 99, "👋🏽");
+    assert_eq!(text, "hi👋🏽");
+    assert_eq!(caret, text.len());
+}
