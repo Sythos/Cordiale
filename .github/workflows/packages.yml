@@ -237,6 +237,15 @@ jobs:
             throw "cargo build failed with exit code $LASTEXITCODE"
           }
 
+      # Known linker warnings of this step. Both are external and safe to keep:
+      # - "QTKit.framework/QTKit.tbd ... not arm64": ffmpeg-sys-next 9.1.1
+      #   (build.rs) links QTKit on every static macOS build. The macOS SDK
+      #   stub does not declare arm64, so the linker ignores it. FFmpeg does
+      #   not need QTKit at run time.
+      # - "no platform load command" for FFmpeg archive objects: the objects
+      #   come from the vcpkg FFmpeg archive (assembly objects). The linker
+      #   assumes macOS, which is the target.
+      # Remove neither FFmpeg nor hardware decoding to hide them.
       - name: Build release binary (native, hardware decoding, macOS)
         id: mac_hw_build
         if: runner.os == 'macOS' && matrix.hw_decode == 'true' && steps.mac_ffmpeg.outcome == 'success'
@@ -618,6 +627,9 @@ jobs:
       contents: write
 
     steps:
+      # The Node Buffer() deprecation notice (DEP0005) comes from this action,
+      # not from Cordiale code. v8.0.2 is the latest release, so no update
+      # removes it. Look again when the action publishes a newer release.
       - name: Download all package artifacts
         uses: actions/download-artifact@v8
         with:
