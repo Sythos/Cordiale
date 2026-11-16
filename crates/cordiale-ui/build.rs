@@ -45,6 +45,20 @@ fn main() {
         .join()
         .expect("the Slint compiler thread panicked");
 
+    // Hardware decoding on Windows links FFmpeg's avcodec.lib. Its Media
+    // Foundation wrappers need the GUID definitions of `mfuuid.lib`
+    // (IID_IMFTransform, IID_IMFMediaEventGenerator) and `strmiids.lib`
+    // (IID_ICodecAPI). The vcpkg route of ffmpeg-sys-next does not link
+    // them, so the link fails with unresolved externals. Both libraries
+    // ship with the Windows SDK for x64 and ARM64. A build script reads the
+    // target and the features from the environment, not from `cfg!`.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var_os("CARGO_FEATURE_HW_DECODE").is_some()
+    {
+        println!("cargo:rustc-link-lib=mfuuid");
+        println!("cargo:rustc-link-lib=strmiids");
+    }
+
     // Embed the app icon into the .exe on Windows. The .ico is generated
     // from resources/branding/cordiale_icona.png by the release-building
     // workflows (packages.yml, dev-build.yml) with ImageMagick before
