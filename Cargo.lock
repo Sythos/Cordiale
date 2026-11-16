@@ -1196,6 +1196,7 @@ dependencies = [
  "cordiale-core",
  "ctap-hid-fido2",
  "dark-light",
+ "emojis",
  "ffmpeg-next",
  "iana-time-zone",
  "image",
@@ -1766,6 +1767,15 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "emojis"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "589871e639330783bc20ad89d32ac1b049e02c273d96c907ca27478c8bc674a2"
+dependencies = [
+ "phf",
+]
 
 [[package]]
 name = "encoding_rs"

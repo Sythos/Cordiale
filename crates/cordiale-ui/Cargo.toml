@@ -70,6 +70,7 @@ avif-parse = "2.1"
 resvg = { version = "0.50", default-features = false, features = ["raster-images"] }
 # Hardware video decoding (`media_hw.rs`), behind the `hw-decode` feature.
 ffmpeg-next = { version = "9", optional = true }
+emojis = "0.9.1"
 
 # The taskbar overlay badge: the window handle and ITaskbarList3; the
 # keyboard layout for the Debug page; the passkey ceremony's structs from
