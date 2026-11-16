@@ -17406,6 +17406,25 @@ fn links_panel_takes_the_clicks_made_inside_it() {
 }
 
 #[test]
+fn links_panel_splits_graph_and_names_by_75_and_25_percent() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let panel = slint
+        .split(r#"if links-popup-open && screen == "connected" : Rectangle {"#)
+        .nth(1)
+        .and_then(|rest| rest.split("// WHOIS card").next())
+        .expect("links panel");
+    // The graph pans in a Flickable on the left; the names scroll in a
+    // ListView on the right. No backdrop covers the chat.
+    assert!(panel.contains("width: parent.width * 0.75"));
+    assert!(panel.contains("x: parent.width * 0.75"));
+    assert!(panel.contains("width: parent.width * 0.25"));
+    assert!(panel.contains("Flickable {"));
+    assert!(panel.contains("ListView {"));
+    assert!(!panel.contains("Show graph"));
+    assert!(!slint.contains("LinksGraphWindow"));
+}
+
+#[test]
 fn links_view_keeps_names_and_graph_on_one_network() {
     let view = build_links_view(&links_payload("alpha"));
     assert_eq!(view.network_label, "alpha");
