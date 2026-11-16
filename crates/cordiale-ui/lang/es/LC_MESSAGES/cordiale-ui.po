@@ -4218,5 +4218,9 @@ msgid "Cordiale cannot list the audio outputs. It uses the host default."
 msgstr "Cordiale no puede listar las salidas de audio. Usa la predeterminada del sistema."
 
 msgctxt "AppWindow"
+msgid "The sound that plays now could not move to the new audio output. New playback uses it."
+msgstr "El sonido en reproducción no pudo pasar a la nueva salida de audio. Las nuevas reproducciones la usan."
+
+msgctxt "AppWindow"
 msgid "Audio output applied."
 msgstr "Salida de audio aplicada."
