@@ -26,6 +26,7 @@ slint::include_modules!();
 
 mod admin_handlers;
 mod admin_uploads;
+mod audio_output;
 mod avif_image;
 mod ceremony;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
@@ -293,6 +294,8 @@ enum WorkerCommand {
     RadioStop,
     /// Volume from 0 to 100.
     RadioVolume(i32),
+    /// The audio output changed: move the radio and the media sound to it.
+    AudioOutputChanged,
     RadioEvent(u64, player::PlayerEvent),
     RadioTrack {
         generation: u64,
@@ -653,6 +656,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.set_radio_volume(i32::from(settings.radio_volume));
     ui.set_pref_shrink_videos(settings.shrink_videos);
+    audio_output::shared().set(settings.audio_output.clone());
     ui.set_video_shrink_available(video_processing::is_available());
     push_radio_stations(&ui, &settings.radio_stations);
 
@@ -2237,6 +2241,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::RadioVolume(volume)) => {
                         radio.set_volume(volume.clamp(0, 100) as f32 / 100.0);
+                    }
+                    Some(WorkerCommand::AudioOutputChanged) => {
+                        radio.reopen_output();
+                        if let Some(media) = media_player::existing() {
+                            media.reopen_output();
+                        }
                     }
                     Some(WorkerCommand::RadioEvent(generation, event)) => {
                         handle_radio_event(&mut radio_state, &ui, generation, event);

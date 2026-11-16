@@ -137,6 +137,11 @@ pub struct Settings {
     /// on; the upload popup starts from it and never writes it back.
     #[serde(default)]
     pub shrink_videos: bool,
+    /// The audio output device for radio and media: the id of a device, or
+    /// `None` for the host default. Kept on this device only, never sent to
+    /// Grappa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_output: Option<String>,
     /// Window geometry and divider widths from the last run. Kept on this
     /// device only, never sent to Grappa. An unreadable value is dropped
     /// without touching any other setting.
@@ -228,6 +233,7 @@ impl Default for Settings {
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
             shrink_videos: false,
+            audio_output: None,
             window: None,
         }
     }
@@ -1122,6 +1128,7 @@ mod tests {
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
             shrink_videos: true,
+            audio_output: Some("alsa:default".to_string()),
             window: Some(WindowState {
                 width: Some(1000),
                 height: Some(700),
@@ -1208,6 +1215,22 @@ mod tests {
             serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
         assert!(!decoded.shrink_videos);
         assert!(!Settings::default().shrink_videos);
+    }
+
+    #[test]
+    fn settings_without_an_audio_output_use_the_host_default() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert_eq!(decoded.audio_output, None);
+        let json = serde_json::to_value(&decoded).expect("serialize");
+        assert!(json.get("audio_output").is_none());
+    }
+
+    #[test]
+    fn settings_keep_the_saved_audio_output() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"audio_output":"alsa:hw:1,0"}"#).expect("deserialize");
+        assert_eq!(decoded.audio_output.as_deref(), Some("alsa:hw:1,0"));
     }
 
     #[test]

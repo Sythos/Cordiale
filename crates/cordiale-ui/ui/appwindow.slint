@@ -2221,6 +2221,17 @@ export component AppWindow inherits Window {
     in-out property <bool> pref-shrink-videos: false;
     in property <bool> video-shrink-available: false;
     callback shrink-pref-changed();
+    // Audio output for radio and media (`Settings.audio_output`). The list
+    // is read again each time Settings > General opens; entry 0 is the host
+    // default. `pref-audio-output-index` is the choice that is not applied
+    // yet. `audio-output-status` is "", "missing", "list-failed" or
+    // "applied".
+    in property <[string]> audio-output-names: [];
+    in-out property <int> pref-audio-output-index: 0;
+    in property <string> audio-output-status: "";
+    out property <string> audio-output-default-label: @tr("Host default");
+    callback audio-output-refresh();
+    callback audio-output-apply();
     // The popup shown before an upload when "Ask before uploading" is on:
     // the file, its thumbnail (images only) and the lifetime for this one
     // upload (same menu as `pref-upload-ttl-index`, which it never changes).
@@ -6944,6 +6955,43 @@ export component AppWindow inherits Window {
                         text: "💾  " + @tr("Save");
                         a11y-label: @tr("Save");
                         clicked => { personal-prefs-save-requested(); }
+                    }
+                }
+
+                SectionCard {
+                    icon: "🔊";
+                    title: @tr("Audio output");
+                    init => { audio-output-refresh(); }
+
+                    Text {
+                        text: @tr("Radio, audio files and video sound use this device.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        ComboBox {
+                            model: audio-output-names;
+                            current-index <=> pref-audio-output-index;
+                            accessible-label: @tr("Audio output");
+                            horizontal-stretch: 1;
+                            min-width: 140px;
+                        }
+                        CompactButton {
+                            text: "✔  " + @tr("Apply");
+                            a11y-label: @tr("Apply");
+                            clicked => { audio-output-apply(); }
+                        }
+                    }
+                    if audio-output-status != "" : Text {
+                        text: audio-output-status == "missing"
+                            ? @tr("The saved audio output is not available. Cordiale uses the host default.")
+                            : audio-output-status == "list-failed"
+                            ? @tr("Cordiale cannot list the audio outputs. It uses the host default.")
+                            : @tr("Audio output applied.");
+                        wrap: word-wrap;
+                        color: palette-muted;
                     }
                 }
 

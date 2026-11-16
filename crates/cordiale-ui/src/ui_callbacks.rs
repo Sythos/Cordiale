@@ -47,6 +47,60 @@ pub(crate) fn register_radio_callbacks(
         let _ = persistence::save_settings(&settings);
     });
 
+    // The device of each entry of the Audio output list; entry 0 is the host
+    // default. The list belongs to the last refresh, so Apply reads the
+    // choice from the same list that the user saw.
+    let audio_ids: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None]));
+    let weak_for_audio_refresh = ui.as_weak();
+    let ids_for_refresh = Arc::clone(&audio_ids);
+    ui.on_audio_output_refresh(move || {
+        let Some(ui) = weak_for_audio_refresh.upgrade() else {
+            return;
+        };
+        let saved = persistence::load_settings()
+            .unwrap_or_default()
+            .audio_output;
+        let list = audio_output::choices(
+            saved.as_deref(),
+            ui.get_audio_output_default_label().as_str(),
+            &audio_output::HostDevices,
+        );
+        if let Ok(mut ids) = ids_for_refresh.lock() {
+            *ids = list.ids.clone();
+        }
+        let names: Vec<slint::SharedString> = list
+            .names
+            .iter()
+            .map(|name| slint::SharedString::from(name.as_str()))
+            .collect();
+        ui.set_audio_output_names(slint::ModelRc::new(slint::VecModel::from(names)));
+        ui.set_pref_audio_output_index(i32::try_from(list.selected).unwrap_or(0));
+        ui.set_audio_output_status(list.status.key().into());
+    });
+
+    let weak_for_audio_apply = ui.as_weak();
+    let tx_for_audio_apply = worker_tx.clone();
+    ui.on_audio_output_apply(move || {
+        let Some(ui) = weak_for_audio_apply.upgrade() else {
+            return;
+        };
+        let chosen = usize::try_from(ui.get_pref_audio_output_index())
+            .ok()
+            .and_then(|index| audio_ids.lock().ok()?.get(index).cloned())
+            .flatten();
+        // A device that went away since the list was read gives the default.
+        let resolved = audio_output::resolve(chosen.as_deref(), &audio_output::HostDevices);
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.audio_output = resolved.target.clone();
+        let _ = persistence::save_settings(&settings);
+        audio_output::shared().set(resolved.target);
+        let _ = tx_for_audio_apply.send(WorkerCommand::AudioOutputChanged);
+        ui.set_audio_output_status(resolved.status.key().into());
+        if resolved.status == audio_output::OutputStatus::Ok {
+            ui.set_audio_output_status("applied".into());
+        }
+    });
+
     ui.on_font_size_changed(move |percent| {
         let mut settings = persistence::load_settings().unwrap_or_default();
         settings.font_size_percent = u8::try_from(percent.clamp(50, 150)).unwrap_or(100);

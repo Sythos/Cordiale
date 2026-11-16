@@ -4195,3 +4195,32 @@ msgstr "Risultati della ricerca"
 msgctxt "AppWindow"
 msgid "No emoji found"
 msgstr "Nessuna emoji trovata"
+
+
+msgctxt "AppWindow"
+msgid "Host default"
+msgstr "Predefinito del sistema"
+
+msgctxt "AppWindow"
+msgid "Audio output"
+msgstr "Uscita audio"
+
+msgctxt "AppWindow"
+msgid "Radio, audio files and video sound use this device."
+msgstr "Radio, file audio e audio dei video usano questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "Apply"
+msgstr "Applica"
+
+msgctxt "AppWindow"
+msgid "The saved audio output is not available. Cordiale uses the host default."
+msgstr "L'uscita audio salvata non è disponibile. Cordiale usa quella predefinita del sistema."
+
+msgctxt "AppWindow"
+msgid "Cordiale cannot list the audio outputs. It uses the host default."
+msgstr "Cordiale non riesce a elencare le uscite audio. Usa quella predefinita del sistema."
+
+msgctxt "AppWindow"
+msgid "Audio output applied."
+msgstr "Uscita audio applicata."

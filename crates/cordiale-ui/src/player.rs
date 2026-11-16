@@ -59,6 +59,8 @@ enum Command {
     },
     Stop,
     Volume(f32),
+    /// The selected output changed: open it, and tune the station again.
+    Reopen,
 }
 
 /// Handle to the audio thread, which owns the output device.
@@ -95,6 +97,12 @@ impl RadioPlayer {
     pub fn set_volume(&self, volume: f32) {
         let _ = self.commands.send(Command::Volume(volume.clamp(0.0, 1.0)));
     }
+
+    /// Moves the sound to the selected output (see `audio_output`). A
+    /// station that plays is tuned again on the new device.
+    pub fn reopen_output(&self) {
+        let _ = self.commands.send(Command::Reopen);
+    }
 }
 
 type EventSink = Arc<dyn Fn(u64, PlayerEvent) + Send + Sync>;
@@ -103,23 +111,42 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
     let mut device: Option<rodio::MixerDeviceSink> = None;
     let mut current: Option<(Arc<rodio::Player>, Arc<AtomicBool>)> = None;
     let mut volume = 1.0;
+    // The station that plays now, to tune it again on another output.
+    let mut tuned: Option<(String, bool, &'static str, u64)> = None;
+    let gate = Arc::new(Mutex::new(()));
     for command in commands {
+        let command = match command {
+            Command::Reopen => {
+                let active = current.is_some();
+                stop_current(&mut current, &gate);
+                device = None;
+                match tuned.clone() {
+                    Some((url, allow_local, hint, generation)) if active => Command::Play {
+                        url,
+                        allow_local,
+                        hint,
+                        generation,
+                    },
+                    _ => continue,
+                }
+            }
+            other => other,
+        };
         match command {
+            Command::Reopen => {}
             Command::Play {
                 url,
                 allow_local,
                 hint,
                 generation,
             } => {
-                stop_current(&mut current);
+                stop_current(&mut current, &gate);
+                tuned = Some((url.clone(), allow_local, hint, generation));
                 if device.is_none() {
-                    match rodio::DeviceSinkBuilder::open_default_sink() {
-                        Ok(mut sink) => {
-                            sink.log_on_drop(false);
-                            device = Some(sink);
-                        }
+                    match crate::audio_output::open_selected_sink() {
+                        Ok(sink) => device = Some(sink),
                         Err(err) => {
-                            on_event(generation, PlayerEvent::Failed(err.to_string()));
+                            on_event(generation, PlayerEvent::Failed(err));
                             continue;
                         }
                     }
@@ -130,6 +157,13 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 let player = Arc::new(rodio::Player::connect_new(sink.mixer()));
                 player.set_volume(volume);
                 let cancelled = Arc::new(AtomicBool::new(false));
+                // The stream reports only through this sink, which drops
+                // the events of a cancelled stream.
+                let events = guarded_sink(
+                    Arc::clone(&gate),
+                    Arc::clone(&cancelled),
+                    Arc::clone(&on_event),
+                );
                 start_stream(
                     url,
                     allow_local,
@@ -137,11 +171,14 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                     generation,
                     Arc::clone(&player),
                     Arc::clone(&cancelled),
-                    Arc::clone(&on_event),
+                    events,
                 );
                 current = Some((player, cancelled));
             }
-            Command::Stop => stop_current(&mut current),
+            Command::Stop => {
+                tuned = None;
+                stop_current(&mut current, &gate);
+            }
             Command::Volume(value) => {
                 volume = value;
                 if let Some((player, _)) = &current {
@@ -152,11 +189,31 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
     }
 }
 
-fn stop_current(current: &mut Option<(Arc<rodio::Player>, Arc<AtomicBool>)>) {
+fn stop_current(current: &mut Option<(Arc<rodio::Player>, Arc<AtomicBool>)>, gate: &Mutex<()>) {
     if let Some((player, cancelled)) = current.take() {
+        // The gate makes the cancel and the sending of an event exclusive:
+        // a stream never reports after the cancel, so the stream that
+        // replaces it (same generation after a new output) is not confused.
+        let _held = gate.lock();
         cancelled.store(true, Ordering::Relaxed);
+        drop(_held);
         player.stop();
     }
+}
+
+/// Wraps `on_event` for one stream: an event goes through only while the
+/// stream is not cancelled. The check and the send run under `gate`.
+fn guarded_sink(
+    gate: Arc<Mutex<()>>,
+    cancelled: Arc<AtomicBool>,
+    on_event: EventSink,
+) -> EventSink {
+    Arc::new(move |generation, event| {
+        let _held = gate.lock();
+        if !cancelled.load(Ordering::Relaxed) {
+            on_event(generation, event);
+        }
+    })
 }
 
 /// Stream bytes buffered between the network and the decoder (chunks as
@@ -430,6 +487,30 @@ impl Source for LiveSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_stream_sends_no_event() {
+        let gate = Arc::new(Mutex::new(()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(0usize));
+        let counter = Arc::clone(&seen);
+        let sink = guarded_sink(
+            Arc::clone(&gate),
+            Arc::clone(&cancelled),
+            Arc::new(move |_, _| *counter.lock().unwrap() += 1),
+        );
+        sink(1, PlayerEvent::Playing);
+        assert_eq!(*seen.lock().unwrap(), 1);
+        {
+            let _held = gate.lock().unwrap();
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        sink(1, PlayerEvent::Failed("late".to_string()));
+        sink(1, PlayerEvent::Ended);
+        sink(1, PlayerEvent::Title("late".to_string()));
+        sink(1, PlayerEvent::Playing);
+        assert_eq!(*seen.lock().unwrap(), 1);
+    }
 
     #[test]
     fn stream_reader_reads_chunks_in_order_and_ends() {

@@ -90,6 +90,8 @@ enum Command {
     Pause,
     Seek(f64),
     Volume(f32),
+    /// The selected output changed: open it and move the sound there.
+    Reopen,
     Close,
 }
 
@@ -138,6 +140,12 @@ impl MediaPlayer {
         let _ = self.commands.send(Command::Volume(volume.clamp(0.0, 1.0)));
     }
 
+    /// Moves the sound to the selected output (see `audio_output`). The
+    /// position, the play or pause state and the volume stay.
+    pub fn reopen_output(&self) {
+        let _ = self.commands.send(Command::Reopen);
+    }
+
     /// Stops the file and frees it.
     pub fn close(&self) {
         let _ = self.commands.send(Command::Close);
@@ -163,19 +171,7 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 // opened. Open it again for each file, so a new default
                 // device (a headset, a monitor) gets the sound.
                 device = None;
-                match rodio::DeviceSinkBuilder::open_default_sink() {
-                    Ok(mut sink) => {
-                        sink.log_on_drop(false);
-                        device = Some(sink);
-                        cordiale_core::persistence::log_line(&audio_output_line(
-                            crate::debug_info::default_audio_output().as_deref(),
-                        ));
-                    }
-                    Err(err) => {
-                        // A video can play without a sound device.
-                        cordiale_core::persistence::log_line(&format!("no audio output: {err}"));
-                    }
-                }
+                ensure_device(&mut device);
                 match Session::open(bytes, &extension, generation, volume, device.as_ref()) {
                     Ok(opened) => {
                         on_event(
@@ -224,6 +220,15 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                     audio.set_volume(volume);
                 }
             }
+            Ok(Command::Reopen) => {
+                device = None;
+                if let Some(open) = session.as_mut().filter(|open| !open.ended) {
+                    ensure_device(&mut device);
+                    if let Err(reason) = open.move_output(volume, device.as_ref()) {
+                        on_event(open.generation, MediaEvent::Failed(reason));
+                    }
+                }
+            }
             Ok(Command::Close) => session = None,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -231,6 +236,23 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
         if let Some(open) = session.as_mut() {
             open.tick(&on_event);
         }
+    }
+}
+
+/// Opens the selected output when none is open. A video can play without a
+/// sound device, so an error only goes to the log.
+fn ensure_device(device: &mut Option<rodio::MixerDeviceSink>) {
+    if device.is_some() {
+        return;
+    }
+    match crate::audio_output::open_selected_sink() {
+        Ok(sink) => {
+            *device = Some(sink);
+            cordiale_core::persistence::log_line(&audio_output_line(
+                crate::debug_info::default_audio_output().as_deref(),
+            ));
+        }
+        Err(err) => cordiale_core::persistence::log_line(&format!("no audio output: {err}")),
     }
 }
 
@@ -378,6 +400,24 @@ impl Session {
             device,
         )?;
         *self = again;
+        Ok(())
+    }
+
+    /// Plays the file on another output from the same position, with the
+    /// same play or pause state. A file with no sound has nothing to move.
+    fn move_output(
+        &mut self,
+        volume: f32,
+        device: Option<&rodio::MixerDeviceSink>,
+    ) -> Result<(), String> {
+        if self.audio.is_none() {
+            return Ok(());
+        }
+        let position = self.position();
+        let paused = self.paused;
+        self.restart(volume, device)?;
+        self.seek(position);
+        self.set_paused(paused);
         Ok(())
     }
 
