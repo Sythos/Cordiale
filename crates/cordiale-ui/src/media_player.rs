@@ -159,18 +159,21 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 generation,
             }) => {
                 session = None;
-                if device.is_none() {
-                    match rodio::DeviceSinkBuilder::open_default_sink() {
-                        Ok(mut sink) => {
-                            sink.log_on_drop(false);
-                            device = Some(sink);
-                        }
-                        Err(err) => {
-                            // A video can play without a sound device.
-                            cordiale_core::persistence::log_line(&format!(
-                                "no audio output: {err}"
-                            ));
-                        }
+                // The sink follows the device that was the default when it
+                // opened. Open it again for each file, so a new default
+                // device (a headset, a monitor) gets the sound.
+                device = None;
+                match rodio::DeviceSinkBuilder::open_default_sink() {
+                    Ok(mut sink) => {
+                        sink.log_on_drop(false);
+                        device = Some(sink);
+                        cordiale_core::persistence::log_line(&audio_output_line(
+                            crate::debug_info::default_audio_output().as_deref(),
+                        ));
+                    }
+                    Err(err) => {
+                        // A video can play without a sound device.
+                        cordiale_core::persistence::log_line(&format!("no audio output: {err}"));
                     }
                 }
                 match Session::open(bytes, &extension, generation, volume, device.as_ref()) {
@@ -320,6 +323,12 @@ impl Session {
             }
             (None, _) if video.is_none() => return Err("no audio track".to_string()),
             (Some(_), None) if video.is_none() => return Err("no audio output".to_string()),
+            (Some(_), None) => {
+                cordiale_core::persistence::log_line(
+                    "video has a sound, but no audio output is open: it plays without sound",
+                );
+                None
+            }
             _ => None,
         };
         let mut clock = WallClock {
@@ -506,6 +515,14 @@ impl VideoStats {
 struct AudioStats {
     /// Times when the output found the decoded queue empty and had to wait.
     underruns: AtomicU64,
+}
+
+/// The log line for the audio output that the player opened.
+fn audio_output_line(device: Option<&str>) -> String {
+    format!(
+        "audio output opened: {}",
+        device.unwrap_or("default device (name not available)")
+    )
 }
 
 /// The line for the log.
@@ -2126,6 +2143,15 @@ mod tests {
     }
 
     #[test]
+    fn the_audio_output_line_names_the_device() {
+        assert_eq!(
+            audio_output_line(Some("Speakers (host: WASAPI)")),
+            "audio output opened: Speakers (host: WASAPI)"
+        );
+        assert!(audio_output_line(None).contains("name not available"));
+    }
+
+    #[test]
     fn a_failed_audio_track_gives_no_source() {
         assert!(audio_or_log(Err(NO_AUDIO_TRACK.to_string())).is_none());
         assert!(audio_or_log(Err("unsupported audio".to_string())).is_none());
@@ -2311,6 +2337,13 @@ mod tests {
         let samples: Vec<Sample> = source.collect();
         assert_eq!(samples.len(), 8_000);
         assert!(samples.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn an_audio_file_without_an_output_device_fails_with_a_reason() {
+        let bytes = wav_second(8_000);
+        let result = Session::open(bytes, "wav", 1, 1.0, None);
+        assert_eq!(result.err().as_deref(), Some("no audio output"));
     }
 
     #[test]
