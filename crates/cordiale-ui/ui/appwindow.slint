@@ -11037,6 +11037,12 @@ export component AppWindow inherits Window {
         background: theme == "dark" ? #242424 : white;
         clip: true;
 
+        // Keeps clicks and wheel events inside the panel from reaching the
+        // chat below. It has no size, so it covers only the panel.
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
         VerticalLayout {
             padding: 10px;
             spacing: 6px;

@@ -17308,6 +17308,20 @@ fn links_payload(network: &str) -> serde_json::Value {
 }
 
 #[test]
+fn links_panel_takes_the_clicks_made_inside_it() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let panel = slint
+        .split(r#"if links-popup-open && screen == "connected" : Rectangle {"#)
+        .nth(1)
+        .and_then(|rest| rest.split("// WHOIS card").next())
+        .expect("links panel");
+    let touch = panel.find("TouchArea").expect("panel touch area");
+    let layout = panel.find("VerticalLayout").expect("panel layout");
+    assert!(touch < layout, "the touch area must sit below the controls");
+    assert!(panel.contains("scroll-event"));
+}
+
+#[test]
 fn links_view_keeps_names_and_graph_on_one_network() {
     let view = build_links_view(&links_payload("alpha"));
     assert_eq!(view.network_label, "alpha");
