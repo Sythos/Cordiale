@@ -56,6 +56,8 @@ pub struct Diagnostics {
     pub display_size: Option<(u32, u32)>,
     pub scale_factor: Option<f32>,
     pub windowing_system: Option<String>,
+    /// The default audio output device and its audio host.
+    pub audio_output: Option<String>,
     pub system_locale: Option<String>,
     pub app_language: Option<String>,
     pub keyboard_layout: Option<String>,
@@ -132,6 +134,7 @@ impl Diagnostics {
             "Windowing system",
             self.windowing_system.as_deref(),
         );
+        line(&mut out, "Audio output", self.audio_output.as_deref());
 
         out.push('\n');
         line(&mut out, "System locale", self.system_locale.as_deref());
@@ -212,6 +215,16 @@ pub fn describe_graphics(backend: Option<&str>, renderer: Option<&str>) -> Optio
     }
 }
 
+/// The audio output line: the device name with the audio host when known.
+/// Without a device name there is nothing to show.
+pub fn describe_audio_output(device: Option<&str>, host: Option<&str>) -> Option<String> {
+    let device = device.map(str::trim).filter(|name| !name.is_empty())?;
+    match host.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(host) => Some(format!("{device} (host: {host})")),
+        None => Some(device.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +247,7 @@ mod tests {
             display_size: Some((2560, 1440)),
             scale_factor: Some(1.5),
             windowing_system: Some("Wayland".into()),
+            audio_output: Some("Built-in Audio (host: ALSA)".into()),
             system_locale: Some("it_IT.UTF-8".into()),
             app_language: Some("it".into()),
             keyboard_layout: Some("it".into()),
@@ -267,6 +281,7 @@ Chat rows held (largest window): 5000
 Display resolution: 2560x1440 px
 Display scale factor: 1.5
 Windowing system: Wayland
+Audio output: Built-in Audio (host: ALSA)
 
 System locale: it_IT.UTF-8
 System language: it
@@ -330,6 +345,7 @@ Chat rows held (largest window): Not available
 Display resolution: Not available
 Display scale factor: Not available
 Windowing system: Not available
+Audio output: Not available
 
 System locale: Not available
 System language: Not available
@@ -405,5 +421,25 @@ Previous log file: %LOCALAPPDATA%\\Cordiale\\cordiale.log.1";
             Some("software renderer")
         );
         assert_eq!(describe_graphics(None, None), None);
+    }
+
+    #[test]
+    fn audio_output_line_uses_what_is_known() {
+        assert_eq!(
+            describe_audio_output(Some("Speakers"), Some("WASAPI")).as_deref(),
+            Some("Speakers (host: WASAPI)")
+        );
+        assert_eq!(
+            describe_audio_output(Some("Speakers"), None).as_deref(),
+            Some("Speakers")
+        );
+        assert_eq!(describe_audio_output(None, Some("WASAPI")), None);
+        assert_eq!(describe_audio_output(Some("  "), Some("WASAPI")), None);
+    }
+
+    #[test]
+    fn audio_output_is_one_line_in_the_report() {
+        let report = full().render();
+        assert_eq!(report.matches("Audio output:").count(), 1);
     }
 }
