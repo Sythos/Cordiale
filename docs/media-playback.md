@@ -99,6 +99,34 @@ Esito (2026-11-15): il responsabile del progetto ha riferito che le prove a
 mano sono passate. Non ha mandato le righe `media playback:`: la tabella in
 fondo non contiene misure, e le tarature restano ai valori attuali.
 
+## Prova del video senza suono (issue 825)
+
+Prova a mano per trovare la causa di un video senza suono. Ripetere su
+Windows, macOS e Linux, con un'uscita audio reale.
+
+1. Aprire Impostazioni > Debug e copiare il rapporto. La riga `Audio output`
+   riporta il dispositivo predefinito e il sistema audio. `Not available`
+   significa che il sistema non indica un dispositivo.
+2. Riprodurre un file audio, un video con audio e un video senza traccia
+   audio. Annotare il contenitore, il codec video e il codec audio.
+3. Leggere il registro. Il video con audio deve avere la riga
+   `audio output opened: <dispositivo>`. Queste righe indicano la causa:
+   - `no audio output: <errore>`: l'uscita non si apre;
+   - `video has a sound, but no audio output is open`: il video parte senza
+     suono perché manca l'uscita;
+   - `webm audio track could not be opened` o una riga sulla traccia audio
+     di un MP4: il decodificatore non legge la traccia.
+4. Il video senza traccia audio non deve scrivere errori audio.
+5. Riprodurre lo stesso video due volte, con la decodifica hardware accesa e
+   con `CORDIALE_VIDEO_DECODE=software`. Confrontare il suono e la riga
+   `media playback:` (`decoder`, `audio_underruns`). Se il suono è uguale e
+   `audio_underruns` è uguale, la decodifica hardware non è la causa.
+6. Controllare audio e video allineati dopo play, pausa, ripresa e
+   spostamento.
+
+Esito: queste prove richiedono un dispositivo audio reale e non girano in CI.
+Nessun risultato è stato consegnato finora: la causa resta non confermata.
+
 ## Build per i tester
 
 - **Linux x64:** il workflow manuale `Dev Build` (job `linux-x64-hw-dev`)
