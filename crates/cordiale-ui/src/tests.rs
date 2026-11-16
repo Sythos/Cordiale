@@ -76,6 +76,61 @@ fn a_video_preview_refuses_a_video_that_is_cut_short() {
 }
 
 #[test]
+fn an_image_preview_keeps_its_ratio_inside_the_bounds() {
+    let dir = tempfile::tempdir().expect("test folder");
+    let path = dir.path().join("wide.png");
+    image::RgbaImage::from_pixel(1280, 320, image::Rgba([10, 20, 30, 255]))
+        .save(&path)
+        .expect("write png");
+    let preview = upload_preview(&path).expect("preview");
+    let size = preview.size();
+    assert!(size.width <= 640 && size.height <= 360);
+    assert_eq!(size.width, 4 * size.height);
+    // A file that is not an image has no thumbnail.
+    let text = dir.path().join("note.png");
+    std::fs::write(&text, b"not an image").expect("write");
+    assert!(upload_preview(&text).is_none());
+    assert!(upload_preview(&dir.path().join("missing.png")).is_none());
+}
+
+#[test]
+fn the_upload_options_follow_the_lifetime_menu_and_the_shrink_switch() {
+    assert_eq!(
+        upload_options(0, false),
+        UploadOptions {
+            expire: None,
+            shrink: false
+        }
+    );
+    assert_eq!(
+        upload_options(2, true),
+        UploadOptions {
+            expire: Some(43_200),
+            shrink: true
+        }
+    );
+    // An entry the menu does not offer means the server default.
+    assert_eq!(upload_options(99, true).expire, None);
+}
+
+#[test]
+fn only_send_starts_an_upload() {
+    let path = std::path::PathBuf::from("clip.mp4");
+    let options = upload_options(3, true);
+    // Send hands the pending file and the chosen options to the worker.
+    match upload_command(Some(path.clone()), options, true) {
+        Some(WorkerCommand::AttachFile(sent, sent_options)) => {
+            assert_eq!(sent, path);
+            assert_eq!(sent_options, options);
+        }
+        _ => panic!("send must start the upload"),
+    }
+    // Cancel starts nothing, and nor does Send with no pending file.
+    assert!(upload_command(Some(path), options, false).is_none());
+    assert!(upload_command(None, options, true).is_none());
+}
+
+#[test]
 fn services_console_captures_only_fresh_notices_from_its_service() {
     let console = ServiceConsoleState {
         network: "libera".into(),
