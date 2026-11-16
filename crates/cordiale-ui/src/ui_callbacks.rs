@@ -1657,30 +1657,6 @@ pub(crate) fn register_admin_user_callbacks(
             .send(WorkerCommand::AdminTerminateSession(session_id.to_string()));
     });
 
-    // Lazily created, reused across requests rather than spawning a new
-    // OS window every click. Only ever touched from this callback, which
-    // Slint guarantees runs on the UI thread — safe to be a plain `Rc`.
-    let graph_window: Rc<RefCell<Option<LinksGraphWindow>>> = Rc::new(RefCell::new(None));
-    let weak_for_graph = ui.as_weak();
-    ui.on_links_graph_requested(move || {
-        let Some(ui) = weak_for_graph.upgrade() else {
-            return;
-        };
-        let mut slot = graph_window.borrow_mut();
-        if slot.is_none() {
-            let Ok(window) = LinksGraphWindow::new() else {
-                return;
-            };
-            *slot = Some(window);
-        }
-        let window = slot.as_ref().expect("just ensured present above");
-        window.set_network_label(ui.get_links_network_label());
-        window.set_edges_commands(ui.get_links_graph_edges_commands());
-        window.set_nodes(ui.get_links_graph_nodes());
-        window.set_canvas_size(ui.get_links_graph_canvas_size());
-        let _ = window.show();
-    });
-
     let tx_for_user_toggle = worker_tx.clone();
     ui.on_admin_user_toggle_admin(move |user_id, is_admin| {
         let _ = tx_for_user_toggle.send(WorkerCommand::AdminUserToggleAdmin(

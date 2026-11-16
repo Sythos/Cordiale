@@ -2268,10 +2268,28 @@ pub(crate) fn update_members_from_frame(
 }
 
 /// Parses a `links_bundle` payload, reconstructs the tree (see
-/// `cordiale_core::links`), and pushes an indented rendering to the
-/// `"links"` screen. Never crashes on an unexpected shape: an
+/// `cordiale_core::links`), and pushes an indented rendering and the graph
+/// to the floating `/links` panel. The current screen does not change. Never crashes on an unexpected shape: an
 /// unparseable `entries` array just shows nothing rather than erroring.
 fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
+    let view = build_links_view(payload);
+    let _ = ui
+        .clone()
+        .upgrade_in_event_loop(move |ui| apply_links_view(&ui, view));
+}
+
+/// Everything the floating `/links` panel shows: the network label, the
+/// node names and the graph. Built from one payload, so the label, the
+/// names and the graph always belong to the same network.
+pub(crate) struct LinksView {
+    pub(crate) network_label: String,
+    pub(crate) rows: Vec<LinksRow>,
+    pub(crate) edges_commands: String,
+    pub(crate) canvas_size: i32,
+    pub(crate) graph_nodes: Vec<LinksGraphNode>,
+}
+
+pub(crate) fn build_links_view(payload: &Value) -> LinksView {
     let entries: Vec<cordiale_core::links::LinksEntry> = payload
         .get("entries")
         .and_then(|entries| serde_json::from_value(entries.clone()).ok())
@@ -2335,9 +2353,7 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
         })
         .collect();
 
-    // Radial layout for the optional graph window ("Show graph" on the
-    // list screen) — computed here too so it's ready the moment the user
-    // asks for it, rather than recomputed on click.
+    // Radial layout for the graph drawn next to the node names.
     const RING_GAP: f64 = 64.0;
     let layout = cordiale_core::links::radial_layout(&tree, RING_GAP);
     let canvas_center = links_canvas_center(&layout.nodes);
@@ -2357,15 +2373,26 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
         .collect();
     let canvas_size = (canvas_center * 2.0).round() as i32;
 
-    let ui = ui.clone();
-    let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_links_network_label(network_label.into());
-        ui.set_links_rows(Rc::new(slint::VecModel::from(rows)).into());
-        ui.set_links_graph_edges_commands(edges_commands.into());
-        ui.set_links_graph_canvas_size(canvas_size);
-        ui.set_links_graph_nodes(Rc::new(slint::VecModel::from(graph_nodes)).into());
-        ui.set_screen("links".into());
-    });
+    LinksView {
+        network_label,
+        rows,
+        edges_commands,
+        canvas_size,
+        graph_nodes,
+    }
+}
+
+/// Shows `view` in the floating panel. It sets only the `links-*`
+/// properties: the screen, the selected channel and the draft stay as they
+/// are, so a late result never replaces the active view.
+pub(crate) fn apply_links_view(ui: &AppWindow, view: LinksView) {
+    ui.set_links_network_label(view.network_label.into());
+    ui.set_links_rows(Rc::new(slint::VecModel::from(view.rows)).into());
+    ui.set_links_graph_edges_commands(view.edges_commands.into());
+    ui.set_links_graph_canvas_size(view.canvas_size);
+    ui.set_links_graph_nodes(Rc::new(slint::VecModel::from(view.graph_nodes)).into());
+    ui.set_links_zoom(1.0);
+    ui.set_links_popup_open(true);
 }
 
 pub(crate) fn query_history_fetch_window(

@@ -17260,3 +17260,52 @@ fn emoji_insert_keeps_sequences_whole_and_the_caret_on_a_boundary() {
     assert_eq!(text, "hi👋🏽");
     assert_eq!(caret, text.len());
 }
+
+fn links_payload(network: &str) -> serde_json::Value {
+    serde_json::json!({
+        "network": network,
+        "entries": [
+            {"server": "hub.example.net", "linked_to": null, "hopcount": 0, "description": "Hub"},
+            {"server": "leaf.example.net", "linked_to": "hub.example.net", "hopcount": 1, "description": "Leaf"},
+        ],
+    })
+}
+
+#[test]
+fn links_view_keeps_names_and_graph_on_one_network() {
+    let view = build_links_view(&links_payload("alpha"));
+    assert_eq!(view.network_label, "alpha");
+    assert_eq!(view.rows.len(), 2);
+    assert_eq!(view.graph_nodes.len(), 2);
+    assert!(view.rows[0].display.contains("hub.example.net"));
+    assert!(!view.edges_commands.is_empty());
+    assert!(view.canvas_size > 0);
+}
+
+#[test]
+fn links_result_opens_the_panel_without_changing_the_screen() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    assert!(!ui.get_links_popup_open());
+
+    apply_links_view(&ui, build_links_view(&links_payload("alpha")));
+    assert!(ui.get_links_popup_open());
+    assert_eq!(ui.get_screen(), "connected");
+    assert!(ui.get_has_selected_channel());
+    assert_eq!(ui.get_links_network_label(), "alpha");
+    assert_eq!(ui.get_links_rows().row_count(), 2);
+    assert_eq!(ui.get_links_graph_nodes().row_count(), 2);
+
+    // A newer result replaces the data of the panel and resets the zoom.
+    ui.set_links_zoom(2.0);
+    apply_links_view(&ui, build_links_view(&links_payload("beta")));
+    assert_eq!(ui.get_links_network_label(), "beta");
+    assert_eq!(ui.get_links_zoom(), 1.0);
+
+    // Closing the panel leaves the screen and the channel as they are.
+    ui.set_links_popup_open(false);
+    assert_eq!(ui.get_screen(), "connected");
+    assert!(ui.get_has_selected_channel());
+}
