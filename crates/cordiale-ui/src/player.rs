@@ -59,6 +59,8 @@ enum Command {
     },
     Stop,
     Volume(f32),
+    /// The selected output changed: open it, and tune the station again.
+    Reopen,
 }
 
 /// Handle to the audio thread, which owns the output device.
@@ -95,6 +97,12 @@ impl RadioPlayer {
     pub fn set_volume(&self, volume: f32) {
         let _ = self.commands.send(Command::Volume(volume.clamp(0.0, 1.0)));
     }
+
+    /// Moves the sound to the selected output (see `audio_output`). A
+    /// station that plays is tuned again on the new device.
+    pub fn reopen_output(&self) {
+        let _ = self.commands.send(Command::Reopen);
+    }
 }
 
 type EventSink = Arc<dyn Fn(u64, PlayerEvent) + Send + Sync>;
@@ -103,8 +111,28 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
     let mut device: Option<rodio::MixerDeviceSink> = None;
     let mut current: Option<(Arc<rodio::Player>, Arc<AtomicBool>)> = None;
     let mut volume = 1.0;
+    // The station that plays now, to tune it again on another output.
+    let mut tuned: Option<(String, bool, &'static str, u64)> = None;
     for command in commands {
+        let command = match command {
+            Command::Reopen => {
+                let active = current.is_some();
+                stop_current(&mut current);
+                device = None;
+                match tuned.clone() {
+                    Some((url, allow_local, hint, generation)) if active => Command::Play {
+                        url,
+                        allow_local,
+                        hint,
+                        generation,
+                    },
+                    _ => continue,
+                }
+            }
+            other => other,
+        };
         match command {
+            Command::Reopen => {}
             Command::Play {
                 url,
                 allow_local,
@@ -112,14 +140,12 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 generation,
             } => {
                 stop_current(&mut current);
+                tuned = Some((url.clone(), allow_local, hint, generation));
                 if device.is_none() {
-                    match rodio::DeviceSinkBuilder::open_default_sink() {
-                        Ok(mut sink) => {
-                            sink.log_on_drop(false);
-                            device = Some(sink);
-                        }
+                    match crate::audio_output::open_selected_sink() {
+                        Ok(sink) => device = Some(sink),
                         Err(err) => {
-                            on_event(generation, PlayerEvent::Failed(err.to_string()));
+                            on_event(generation, PlayerEvent::Failed(err));
                             continue;
                         }
                     }
@@ -141,7 +167,10 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 );
                 current = Some((player, cancelled));
             }
-            Command::Stop => stop_current(&mut current),
+            Command::Stop => {
+                tuned = None;
+                stop_current(&mut current);
+            }
             Command::Volume(value) => {
                 volume = value;
                 if let Some((player, _)) = &current {
