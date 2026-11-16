@@ -437,14 +437,6 @@ msgid "Reconnecting…"
 msgstr "Reconectando…"
 
 msgctxt "AppWindow"
-msgid "Show graph"
-msgstr "Mostrar gráfico"
-
-msgctxt "LinksGraphWindow"
-msgid "Cordiale — Network Links"
-msgstr "Cordiale — Enlaces de red"
-
-msgctxt "AppWindow"
 msgid "Network identity"
 msgstr "Identidad de red"
 
@@ -1432,19 +1424,19 @@ msgctxt "AppWindow"
 msgid "The server refused that command ({})."
 msgstr "El servidor rechazó ese comando ({})."
 
-msgctxt "LinksGraphWindow"
+msgctxt "AppWindow"
 msgid "Zoom out"
 msgstr "Alejar"
 
-msgctxt "LinksGraphWindow"
+msgctxt "AppWindow"
 msgid "Zoom in"
 msgstr "Acercar"
 
-msgctxt "LinksGraphWindow"
+msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Restablecer"
 
-msgctxt "LinksGraphWindow"
+msgctxt "AppWindow"
 msgid "Reset zoom"
 msgstr "Restablecer el zoom"
 
