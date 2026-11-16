@@ -5611,29 +5611,45 @@ fn confirm_and_attach(
         ui.set_upload_confirm_open(true);
         return;
     }
-    let options = UploadOptions {
-        expire: upload_ttl_for_index(ui.get_pref_upload_ttl_index()),
-        shrink: ui.get_pref_shrink_videos(),
-    };
+    let options = upload_options(ui.get_pref_upload_ttl_index(), ui.get_pref_shrink_videos());
     let _ = tx.send(WorkerCommand::AttachFile(path, options));
 }
 
 /// Closes the upload popup: with `send`, the pending file goes to the worker
 /// with the lifetime picked there; otherwise nothing is uploaded or posted.
 fn finish_upload_confirm(ui: &AppWindow, tx: &mpsc::UnboundedSender<WorkerCommand>, send: bool) {
-    let options = UploadOptions {
-        expire: upload_ttl_for_index(ui.get_upload_confirm_ttl_index()),
-        shrink: ui.get_upload_confirm_shrink(),
-    };
+    let options = upload_options(
+        ui.get_upload_confirm_ttl_index(),
+        ui.get_upload_confirm_shrink(),
+    );
     next_preview_generation();
     ui.set_upload_confirm_open(false);
     ui.set_upload_confirm_loading(false);
     ui.set_upload_confirm_preview(slint::Image::default());
-    let Some(path) = PENDING_UPLOAD.with(|pending| pending.borrow_mut().take()) else {
-        return;
-    };
-    if send {
-        let _ = tx.send(WorkerCommand::AttachFile(path, options));
+    let path = PENDING_UPLOAD.with(|pending| pending.borrow_mut().take());
+    if let Some(command) = upload_command(path, options, send) {
+        let _ = tx.send(command);
+    }
+}
+
+/// The options for one upload, from a lifetime menu entry and the shrink switch.
+fn upload_options(ttl_index: i32, shrink: bool) -> UploadOptions {
+    UploadOptions {
+        expire: upload_ttl_for_index(ttl_index),
+        shrink,
+    }
+}
+
+/// The command that answers the confirmation: only Send with a pending file
+/// starts an upload. Cancel, or no pending file, starts nothing.
+fn upload_command(
+    path: Option<std::path::PathBuf>,
+    options: UploadOptions,
+    send: bool,
+) -> Option<WorkerCommand> {
+    match path {
+        Some(path) if send => Some(WorkerCommand::AttachFile(path, options)),
+        _ => None,
     }
 }
 
