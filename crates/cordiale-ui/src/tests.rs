@@ -18240,6 +18240,130 @@ fn late_history_moves_the_unread_divider_to_the_real_first_message() {
 }
 
 #[test]
+fn the_pane_starts_three_read_messages_above_the_first_unread_one() {
+    // A, B, C and an earlier one are read; D and E are unread.
+    let rows = unread_rows(&[6, 7, 8, 9, 10, 11]);
+    assert_eq!(
+        unread_divider::placement(&rows, 9, false),
+        Some(unread_divider::Placement {
+            start_id: 7,
+            context: 3
+        })
+    );
+}
+
+#[test]
+fn the_pane_shows_all_earlier_messages_when_fewer_than_three_exist() {
+    let rows = unread_rows(&[9, 10, 11]);
+    assert_eq!(
+        unread_divider::placement(&rows, 9, false),
+        Some(unread_divider::Placement {
+            start_id: 9,
+            context: 1
+        })
+    );
+    let rows = unread_rows(&[10, 11]);
+    assert_eq!(
+        unread_divider::placement(&rows, 9, false),
+        Some(unread_divider::Placement {
+            start_id: 10,
+            context: 0
+        })
+    );
+}
+
+#[test]
+fn presence_rows_do_not_count_as_read_messages() {
+    let mut rows = unread_rows(&[5, 6, 7, 8, 9, 10]);
+    rows[3].presence_noise = true;
+    rows[4].presence_noise = true;
+    // Rows 5, 6 and 7 are the three read chat messages above 10.
+    assert_eq!(
+        unread_divider::placement(&rows, 9, false),
+        Some(unread_divider::Placement {
+            start_id: 5,
+            context: 3
+        })
+    );
+    // The first unread message is a presence line that Denoise hides.
+    rows[5].presence_noise = true;
+    assert_eq!(unread_divider::placement(&rows, 9, true), None);
+}
+
+#[test]
+fn a_channel_without_unread_messages_has_no_placement() {
+    let rows = unread_rows(&[10, 11, 12]);
+    assert_eq!(unread_divider::placement(&rows, 12, false), None);
+    assert_eq!(unread_divider::placement(&[], 0, false), None);
+}
+
+#[test]
+fn late_history_moves_the_start_of_the_pane() {
+    let mut rows = unread_rows(&[12]);
+    assert_eq!(
+        unread_divider::placement(&rows, 10, false),
+        Some(unread_divider::Placement {
+            start_id: 12,
+            context: 0
+        })
+    );
+    merge_rendered_messages(&mut rows, unread_rows(&[7, 8, 9, 10, 11]));
+    assert_eq!(
+        unread_divider::placement(&rows, 10, false),
+        Some(unread_divider::Placement {
+            start_id: 8,
+            context: 3
+        })
+    );
+}
+
+#[test]
+fn older_rows_are_requested_only_while_context_is_missing() {
+    let mut state = WorkerState::new();
+    let key = ("net".to_string(), "#room".to_string());
+    let cursor_key = window_state_key(&key.0, &key.1);
+    state.windows.current_channel = Some(key.clone());
+    state.windows.unread_baseline = Some((cursor_key, 10));
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), unread_rows(&[10, 11]));
+    assert!(unread_divider::needs_older_context(&state));
+    // The server has no older page: nothing more to ask for.
+    state.transcript.history_start_reached.insert(key.clone());
+    assert!(!unread_divider::needs_older_context(&state));
+    // Three read messages are known: nothing more to ask for.
+    state.transcript.history_start_reached.remove(&key);
+    state
+        .transcript
+        .messages
+        .insert(key, unread_rows(&[7, 8, 9, 10, 11]));
+    assert!(!unread_divider::needs_older_context(&state));
+}
+
+#[test]
+fn the_placement_of_another_channel_is_not_reused() {
+    let mut state = WorkerState::new();
+    let other = ("net".to_string(), "#other".to_string());
+    let key = ("net".to_string(), "#room".to_string());
+    state.windows.current_channel = Some(key.clone());
+    state.windows.unread_baseline = Some((window_state_key(&other.0, &other.1), 10));
+    state
+        .transcript
+        .messages
+        .insert(key, unread_rows(&[10, 11]));
+    assert_eq!(unread_divider::current_placement(&state), None);
+}
+
+#[test]
+fn reading_is_held_back_while_the_pane_waits_for_its_start() {
+    let state = WorkerState::new();
+    assert!(!state.windows.unread_hold.get());
+    state.windows.unread_hold.set(true);
+    assert!(state.windows.unread_hold.get());
+}
+
+#[test]
 fn the_unread_baseline_is_kept_while_the_same_window_stays_open() {
     let mut state = WorkerState::new();
     let key = ("net".to_string(), "#room".to_string());

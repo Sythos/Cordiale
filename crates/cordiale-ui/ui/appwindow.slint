@@ -1766,6 +1766,14 @@ export component AppWindow inherits Window {
     in-out property <string> unread-divider-label: "";
     in-out property <int> unread-divider-count: 0;
     in-out property <bool> unread-divider-dismissed: false;
+    // Where the pane starts when a channel opens with unread messages: the
+    // row of the message at the top and the window it belongs to, -1 for
+    // none. `unread-start-hold` is true while Rust still looks for that row,
+    // so the pane does not snap to the newest line yet. A manual scroll
+    // (`unread-divider-dismissed`) ends the placement.
+    in-out property <int> unread-start-row: -1;
+    in-out property <string> unread-start-label: "";
+    in-out property <bool> unread-start-hold: false;
     callback older-history-requested();
     // A message row of the mentions summary was clicked (its row index).
     callback mention-open-requested(int);
@@ -5411,6 +5419,36 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // A channel with unread messages opens at the first one,
+                // with the read messages above it that Rust chose as the
+                // start row. Like a resume, the jump seeks by the average
+                // row height, and `changed content-height` puts the row
+                // back while the rows are measured. A manual scroll or
+                // another window ends it.
+                property <bool> placing: false;
+                property <int> start-row: unread-start-row;
+                property <bool> start-hold: unread-start-hold;
+                function place-unread() {
+                    if unread-start-row < 0 || unread-divider-dismissed
+                        || unread-start-label != current-channel-label {
+                        return;
+                    }
+                    placing = true;
+                    let bottom = min(0px, self.visible-height - self.content-height);
+                    let average = self.content-height / max(1, chat-lines.length);
+                    self.content-y = max(bottom, min(0px, -(unread-start-row + 0.5) * average));
+                    self.follow-bottom = self.content-y <= bottom + 4px;
+                }
+                changed start-row => { place-unread(); }
+                changed start-hold => {
+                    // No unread message was found: open on the newest line.
+                    if !start-hold && unread-start-row < 0 && !unread-divider-dismissed {
+                        placing = false;
+                        self.follow-bottom = true;
+                        self.content-y = min(0px, self.visible-height - self.content-height);
+                    }
+                }
+
                 // A fresh pane opens on the newest line, unless it is the
                 // same window's pane coming back from another screen with
                 // the reader scrolled up: then Rust picks the line to go
@@ -5488,6 +5526,8 @@ export component AppWindow inherits Window {
                     if resuming {
                         resuming = false;
                         chat-resume-landed();
+                    } else if placing && !unread-divider-dismissed {
+                        place-unread();
                     } else if self.follow-bottom {
                         self.content-y = min(0px, self.visible-height - self.content-height);
                     }
@@ -5517,6 +5557,14 @@ export component AppWindow inherits Window {
                     self.follow-bottom = true;
                     older-armed = true;
                     self.content-y = min(0px, self.visible-height - self.content-height);
+                    // Rust sets the start row and the hold with the label,
+                    // so a channel that waits for its first unread message
+                    // is not read or snapped to the newest line here.
+                    placing = false;
+                    if unread-start-hold {
+                        self.follow-bottom = false;
+                    }
+                    place-unread();
                 }
 
                 for line[line-index] in chat-lines : row := Rectangle {

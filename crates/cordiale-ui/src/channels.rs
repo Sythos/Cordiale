@@ -1,5 +1,9 @@
 use super::*;
 
+/// The most older pages a channel opening loads to find read messages above
+/// its first unread message.
+const UNREAD_CONTEXT_PAGES: usize = 4;
+
 pub(crate) async fn handle_select_channel(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -61,6 +65,20 @@ pub(crate) async fn handle_select_channel(
             state.transcript.history_start_reached.contains(&key),
             open_locked_window(state).is_some(),
         );
+    // A channel with unread messages starts at the first one. The hold keeps
+    // the window from reading them while the pane is placed.
+    let unread_start = if divider_restarts && !server_window {
+        unread_divider::current_placement(state).map(|placement| placement.start_id)
+    } else {
+        None
+    };
+    let unread_hold = divider_restarts
+        && !server_window
+        && state.windows.unread_baseline.is_some()
+        && (unread_start.is_some() || fetch_recent);
+    if divider_restarts || server_window {
+        state.windows.unread_hold.set(unread_hold);
+    }
     refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
 
@@ -114,7 +132,7 @@ pub(crate) async fn handle_select_channel(
     let source_target = channel.clone();
     let ui_weak = ui.clone();
     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-        ui.set_current_channel_label(label.into());
+        ui.set_current_channel_label(label.clone().into());
         ui.set_window_source_network(source_network.into());
         ui.set_window_source_target(source_target.into());
         ui.set_current_topic(irc_topic.into());
@@ -135,10 +153,17 @@ pub(crate) async fn handle_select_channel(
         if divider_restarts || server_window {
             ui.set_unread_divider_id("".into());
             ui.set_unread_divider_dismissed(false);
+            ui.set_unread_start_label("".into());
+            ui.set_unread_start_row(-1);
+            ui.set_unread_start_hold(unread_hold);
         }
         let model =
             chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, model);
+        if let Some(id) = unread_start {
+            ui.set_unread_start_label(label.into());
+            ui.set_unread_start_row(unread_divider::row_of(&ui, &id.to_string()));
+        }
         let member_rows = members_model(&members, dark_theme, &ranking);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
@@ -147,6 +172,19 @@ pub(crate) async fn handle_select_channel(
     // With a recent page on its way, the divider waits for the merge.
     if fetch_recent {
         load_and_show_recent_history(state, ui, &key).await;
+    }
+    // Older rows the server holds go in before the final position is set.
+    if divider_restarts && !server_window {
+        for _ in 0..UNREAD_CONTEXT_PAGES {
+            if !unread_divider::needs_older_context(state) {
+                break;
+            }
+            let known = state.transcript.messages.get(&key).map_or(0, Vec::len);
+            handle_load_older_history(state, ui).await;
+            if state.transcript.messages.get(&key).map_or(0, Vec::len) == known {
+                break;
+            }
+        }
     }
     unread_divider::refresh(state, ui);
     sync_window_ignores(state, ui).await;
