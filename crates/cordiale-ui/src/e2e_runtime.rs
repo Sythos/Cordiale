@@ -3801,6 +3801,7 @@ pub(crate) fn handle_select_locked_query(
     push_sas_code(ui, String::new());
     close_peer_key(ui);
     open_window(state, &key);
+    push_offline_mention_badge(state, ui);
     load_locked_rows(state, &network, &nick);
     refresh_network_groups(state, ui);
     show_locked_window(state, ui, &network, &nick);

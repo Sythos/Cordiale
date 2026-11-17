@@ -73,8 +73,19 @@ pub(crate) async fn handle_open_mention(
     let Some(id) = jump.id else {
         return;
     };
+    jump_to_message(state, ui, key, id).await;
+}
+
+/// Loads the page around message `id` of the open window `key`, scrolls to
+/// the row and highlights it. Returns `true` when the view reached it.
+async fn jump_to_message(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: (String, String),
+    id: i64,
+) -> bool {
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
-        return;
+        return false;
     };
     let rows = match client
         .fetch_messages_around(&token, &key.0, &key.1, id, AROUND_PAGE)
@@ -95,7 +106,7 @@ pub(crate) async fn handle_open_mention(
                     "mention-load-failed"
                 },
             );
-            return;
+            return false;
         }
     };
     // A page entirely older than what the window holds would sit next to
@@ -121,7 +132,7 @@ pub(crate) async fn handle_open_mention(
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
     // The reader may have switched window while the page was loading.
     if state.windows.current_channel.as_ref() != Some(&key) {
-        return;
+        return false;
     }
     let denoise = state.denoise_active(&key);
     let row = state
@@ -131,7 +142,7 @@ pub(crate) async fn handle_open_mention(
         .and_then(|lines| mention_row(lines, id, denoise));
     let Some(row) = row else {
         mention_status(ui, "mention-not-found");
-        return;
+        return false;
     };
     push_chat_lines_update(state, ui, &key);
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -159,6 +170,81 @@ pub(crate) async fn handle_open_mention(
             }
         });
     });
+    true
+}
+
+/// The offline mentions to visit, per channel window (folded key), in chat
+/// order. A message counts once, whatever its body holds. DM rows have no
+/// channel window and are left out.
+pub(crate) fn offline_mention_queues(
+    network: &str,
+    jumps: &[MentionJump],
+) -> HashMap<(String, String), VecDeque<i64>> {
+    let mut ids: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    for jump in jumps {
+        if let (MentionWindow::Channel(name), Some(id)) = (&jump.window, jump.id) {
+            ids.entry(window_state_key(network, name))
+                .or_default()
+                .push(id);
+        }
+    }
+    ids.into_iter()
+        .map(|(key, mut ids)| {
+            ids.sort_unstable();
+            ids.dedup();
+            (key, ids.into())
+        })
+        .collect()
+}
+
+/// Shows the number of offline mentions left in the open window on the badge.
+pub(crate) fn push_offline_mention_badge(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let count = state
+        .windows
+        .current_channel
+        .as_ref()
+        .filter(|_| !state.windows.current_query)
+        .and_then(|(network, channel)| {
+            state
+                .panels
+                .offline_mentions
+                .get(&window_state_key(network, channel))
+        })
+        .map_or(0, VecDeque::len);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_offline_mention_count(i32::try_from(count).unwrap_or(i32::MAX));
+    });
+}
+
+/// Badge click: goes to the oldest offline mention of the open window, then
+/// takes it off the queue. A message that cannot be loaded is dropped too,
+/// so the badge never sticks on it.
+pub(crate) async fn handle_visit_offline_mention(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+) {
+    let Some(key) = state.windows.current_channel.clone() else {
+        return;
+    };
+    let folded = window_state_key(&key.0, &key.1);
+    let Some(id) = state
+        .panels
+        .offline_mentions
+        .get(&folded)
+        .and_then(|queue| queue.front().copied())
+    else {
+        return;
+    };
+    jump_to_message(state, ui, key, id).await;
+    if let Some(queue) = state.panels.offline_mentions.get_mut(&folded) {
+        if queue.front() == Some(&id) {
+            queue.pop_front();
+        }
+        if queue.is_empty() {
+            state.panels.offline_mentions.remove(&folded);
+        }
+    }
+    push_offline_mention_badge(state, ui);
 }
 
 /// The pane row of message `id`: its place among the rows the pane shows,
