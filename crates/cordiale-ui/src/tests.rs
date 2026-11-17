@@ -18172,3 +18172,200 @@ fn rendered_row_boxes_do_not_change_with_selection_or_theme() {
         }
     }
 }
+
+fn unread_rows(ids: &[i64]) -> Vec<RenderedMessage> {
+    ids.iter().map(|id| history_row(Some(*id), None)).collect()
+}
+
+#[test]
+fn unread_divider_goes_before_the_first_message_after_the_cursor() {
+    let rows = unread_rows(&[10, 11, 12]);
+    assert_eq!(
+        unread_divider::first_unread(&rows, 10, false),
+        Some((11, 2))
+    );
+    assert_eq!(unread_divider::first_unread(&rows, 9, false), Some((10, 3)));
+}
+
+#[test]
+fn unread_divider_is_absent_when_every_message_is_read() {
+    let rows = unread_rows(&[10, 11, 12]);
+    assert_eq!(unread_divider::first_unread(&rows, 12, false), None);
+    assert_eq!(unread_divider::first_unread(&rows, 40, false), None);
+    assert_eq!(unread_divider::first_unread(&[], 0, false), None);
+}
+
+#[test]
+fn unread_divider_skips_rows_without_an_id_and_hidden_presence_rows() {
+    let mut rows = unread_rows(&[10, 11, 12]);
+    rows.push(history_row(None, None));
+    rows[1].presence_noise = true;
+    assert_eq!(unread_divider::first_unread(&rows, 10, true), Some((12, 1)));
+    assert_eq!(
+        unread_divider::first_unread(&rows, 10, false),
+        Some((11, 2))
+    );
+}
+
+#[test]
+fn late_history_moves_the_unread_divider_to_the_real_first_message() {
+    // The page that opened the channel has only the newest message.
+    let mut rows = unread_rows(&[12]);
+    assert_eq!(
+        unread_divider::first_unread(&rows, 10, false),
+        Some((12, 1))
+    );
+    // The catch-up merges two older messages and one unread message.
+    merge_rendered_messages(&mut rows, unread_rows(&[9, 10, 11]));
+    assert_eq!(
+        unread_divider::first_unread(&rows, 10, false),
+        Some((11, 2))
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.message_id == Some(11)).count(),
+        1
+    );
+}
+
+#[test]
+fn the_unread_baseline_is_kept_while_the_same_window_stays_open() {
+    let mut state = WorkerState::new();
+    let key = ("net".to_string(), "#room".to_string());
+    let cursor_key = window_state_key(&key.0, &key.1);
+    state.windows.read_cursors.insert(cursor_key.clone(), 10);
+    assert!(unread_divider::remember_baseline(&mut state, &key, false));
+    // The window reads the channel: the cursor moves, the baseline does not.
+    state.windows.read_cursors.insert(cursor_key, 12);
+    assert!(!unread_divider::remember_baseline(&mut state, &key, true));
+    assert_eq!(
+        state
+            .windows
+            .unread_baseline
+            .as_ref()
+            .map(|(_, cursor)| *cursor),
+        Some(10)
+    );
+    // Opening the channel again from another window starts again.
+    assert!(unread_divider::remember_baseline(&mut state, &key, false));
+    assert_eq!(
+        state
+            .windows
+            .unread_baseline
+            .as_ref()
+            .map(|(_, cursor)| *cursor),
+        Some(12)
+    );
+}
+
+#[test]
+fn a_channel_without_a_read_cursor_has_no_baseline() {
+    let mut state = WorkerState::new();
+    let key = ("net".to_string(), "#room".to_string());
+    assert!(unread_divider::remember_baseline(&mut state, &key, false));
+    assert!(state.windows.unread_baseline.is_none());
+}
+
+/// The content height of a pane with three rows, with the divider set on the
+/// row with id 2 for `divider_label` while the pane shows `pane_label`.
+fn unread_divider_pane_height(divider_label: &str, pane_label: &str, dismissed: bool) -> f32 {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_channel_label(pane_label.into());
+    let lines = chat_lines_model(&unread_rows(&[1, 2, 3]), true);
+    ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
+    ui.set_unread_divider_label(divider_label.into());
+    ui.set_unread_divider_count(2);
+    ui.set_unread_divider_id(if dismissed { "" } else { "2" }.into());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1000., 700.));
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().unwrap();
+    }
+    ui.get_chat_content_height()
+}
+
+#[test]
+fn the_unread_divider_adds_one_band_only_for_its_own_window() {
+    let stale = unread_divider_pane_height("other", "net — #room", false);
+    let marked = unread_divider_pane_height("net — #room", "net — #room", false);
+    let dismissed = unread_divider_pane_height("net — #room", "net — #room", true);
+    assert!(
+        marked > stale + 10.,
+        "the divider adds no band: {marked} against {stale}"
+    );
+    assert!((dismissed - stale).abs() < 1., "a dismissed divider stays");
+}
+
+#[test]
+fn only_a_manual_scroll_hides_the_unread_divider() {
+    use slint::platform::WindowEvent;
+    set_headless_software_platform();
+    let ids: Vec<i64> = (1..=200).collect();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_channel_label("net — #room".into());
+    let lines = chat_lines_model(&unread_rows(&ids), true);
+    ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
+    ui.set_unread_divider_label("net — #room".into());
+    ui.set_unread_divider_count(2);
+    ui.set_unread_divider_id("199".into());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1000., 700.));
+    let settle = || {
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            ui.window().take_snapshot().unwrap();
+        }
+    };
+    settle();
+    // Layout changes, a larger model and a programmatic scroll do not hide it.
+    ui.window().set_size(slint::LogicalSize::new(900., 600.));
+    ui.set_chat_scroll_y(-50.);
+    let more = chat_lines_model(&unread_rows(&(1..=220).collect::<Vec<i64>>()), true);
+    show_chat_lines(&ui, more);
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "199");
+    assert!(!ui.get_unread_divider_dismissed());
+    // The wheel is a manual scroll.
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: slint::LogicalPosition::new(600., 300.),
+        delta_x: 0.,
+        delta_y: 200.,
+    });
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "");
+    assert!(ui.get_unread_divider_dismissed());
+}
+
+#[test]
+fn a_keyboard_page_hides_the_unread_divider() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_channel_label("net — #room".into());
+    let lines = chat_lines_model(&unread_rows(&(1..=200).collect::<Vec<i64>>()), true);
+    ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
+    ui.set_unread_divider_label("net — #room".into());
+    ui.set_unread_divider_count(2);
+    ui.set_unread_divider_id("199".into());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1000., 700.));
+    let settle = || {
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            ui.window().take_snapshot().unwrap();
+        }
+    };
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "199");
+    ui.set_chat_page_direction(-1);
+    ui.set_chat_page_seq(ui.get_chat_page_seq() + 1);
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "");
+    assert!(ui.get_unread_divider_dismissed());
+}

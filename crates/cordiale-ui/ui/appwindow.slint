@@ -1757,6 +1757,15 @@ export component AppWindow inherits Window {
     // request failed. A failed page is retried only once the reader comes
     // back to the top (or presses PgUp), never in a loop.
     in-out property <bool> history-failed: false;
+    // The temporary "N unread messages" divider before the first unread row.
+    // It is visual only: Rust sets the id of the first unread message, the
+    // count and the window label the id belongs to; the row whose message id
+    // matches draws the line. A user scroll or a keyboard page sets
+    // `unread-divider-dismissed` and clears the id; Rust clears the flag when another window opens.
+    in-out property <string> unread-divider-id: "";
+    in-out property <string> unread-divider-label: "";
+    in-out property <int> unread-divider-count: 0;
+    in-out property <bool> unread-divider-dismissed: false;
     callback older-history-requested();
     // A message row of the mentions summary was clicked (its row index).
     callback mention-open-requested(int);
@@ -5434,9 +5443,12 @@ export component AppWindow inherits Window {
                 }
 
                 // PgUp/PgDown from the compose box: nine tenths of a screen
-                // per press, so a line of context stays in view.
+                // per press, so a line of context stays in view. A key
+                // press is a manual scroll: it hides the unread divider.
                 property <int> page-seq: chat-page-seq;
                 changed page-seq => {
+                    unread-divider-dismissed = true;
+                    unread-divider-id = "";
                     let bottom = min(0px, self.visible-height - self.content-height);
                     self.content-y = max(bottom, min(0px, self.content-y - chat-page-direction * self.visible-height * 0.9));
                     self.follow-bottom = self.content-y <= bottom + 4px;
@@ -5453,7 +5465,9 @@ export component AppWindow inherits Window {
                 // and increasingly negative going down; a few pixels of
                 // slack absorb the height-estimate's own imprecision.
                 scrolled => {
-                    self.follow-bottom = self.content-y <= self.visible-height - self.content-height + 4px;
+                    unread-divider-dismissed = true;
+                    unread-divider-id = "";
+                    self.follow-bottom =self.content-y <= self.visible-height - self.content-height + 4px;
                     if self.near-top {
                         load-older();
                     } else if history-failed {
@@ -5531,6 +5545,12 @@ export component AppWindow inherits Window {
                     // True while a drag that started in this row is outside
                     // the row, or came back into it.
                     property <bool> ranging: false;
+                    // True for the first unread message of the open window:
+                    // a band at the top of the row holds the divider.
+                    property <bool> unread-divider: unread-divider-id != ""
+                        && line.reply-id == unread-divider-id
+                        && unread-divider-label == current-channel-label
+                        && line.separator == "";
                     // True while a key is down in this row: a cursor move
                     // made by a key never opens a link.
                     property <bool> key-moved: false;
@@ -5613,6 +5633,47 @@ export component AppWindow inherits Window {
                             changed has-hover => {
                                 if !self.has-hover {
                                     row.ranging = false;
+                                }
+                            }
+
+                            VerticalLayout {
+                            spacing: 0px;
+
+                            // The temporary unread divider: a thin line across
+                            // the row with the localized count in the middle.
+                            // It only draws; it is not a row of the model.
+                            if row.unread-divider : HorizontalLayout {
+                                spacing: 8px;
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: 8px;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 1px;
+                                        background: line.timestamp-color;
+                                    }
+                                }
+
+                                Text {
+                                    text: @tr("{n} unread message" | "{n} unread messages" % unread-divider-count);
+                                    color: line.timestamp-color;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                    min-width: 0px;
+                                    overflow: elide;
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: 8px;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 1px;
+                                        background: line.timestamp-color;
+                                    }
                                 }
                             }
 
@@ -6076,6 +6137,7 @@ export component AppWindow inherits Window {
                                     link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                                     activated => { rename-target-requested(line.rename-target); }
                                 }
+                            }
                             }
                         }
                     }

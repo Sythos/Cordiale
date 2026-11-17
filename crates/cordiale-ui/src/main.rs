@@ -67,6 +67,7 @@ mod taskbar;
 mod temp_files;
 mod totp;
 mod ui_callbacks;
+mod unread_divider;
 #[cfg(windows)]
 mod webauthn_windows;
 mod window_state;
@@ -1603,6 +1604,10 @@ struct WindowState {
     /// window key. The network is preserved and only the channel segment is
     /// ASCII-folded, matching Cicchetto's channel key.
     read_cursors: HashMap<(String, String), i64>,
+    /// The read cursor of the open channel as it was when the channel
+    /// opened, before the window read it. The unread divider reads it; no
+    /// other rule does.
+    unread_baseline: Option<((String, String), i64)>,
     /// Account-wide unread badge from `/me` or the latest read-cursor push.
     badge_count: u64,
     /// Network slug -> whether its channel list is expanded in the sidebar.
@@ -1874,6 +1879,7 @@ impl WorkerState {
                 window_mentions: HashMap::new(),
                 window_messages: HashMap::new(),
                 read_cursors: HashMap::new(),
+                unread_baseline: None,
                 badge_count: 0,
                 expanded_networks: HashMap::new(),
                 channel_entries: Vec::new(),
@@ -6419,6 +6425,7 @@ fn push_chat_lines_update(
     let denoise = state.denoise_active(key);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
+    unread_divider::refresh(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_denoise(denoise);

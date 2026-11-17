@@ -4226,5 +4226,11 @@ msgid "Audio output applied."
 msgstr "Sortie audio appliquée."
 
 msgctxt "AppWindow"
+msgid "{n} unread message"
+msgid_plural "{n} unread messages"
+msgstr[0] "{n} message non lu"
+msgstr[1] "{n} messages non lus"
+
+msgctxt "AppWindow"
 msgid "Next mention ({})"
 msgstr "Mention suivante ({})"

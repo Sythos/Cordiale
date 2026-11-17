@@ -30,6 +30,15 @@ pub(crate) async fn handle_select_channel(
     }
 
     let key = (network.clone(), channel.clone());
+    // The channel has not read anything yet: keep its read cursor for the
+    // unread divider, which stays until the user scrolls.
+    let already_open =
+        !state.windows.current_query && state.windows.current_channel.as_ref() == Some(&key);
+    let divider_restarts =
+        !server_window && unread_divider::remember_baseline(state, &key, already_open);
+    if server_window {
+        state.windows.unread_baseline = None;
+    }
     prepare_window_selection(state, &key, false);
     state
         .windows
@@ -123,6 +132,10 @@ pub(crate) async fn handle_select_channel(
         ui.set_history_loading(fetch_recent);
         ui.set_history_failed(false);
         ui.set_current_denoise(denoise);
+        if divider_restarts || server_window {
+            ui.set_unread_divider_id("".into());
+            ui.set_unread_divider_dismissed(false);
+        }
         let model =
             chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, model);
@@ -131,9 +144,11 @@ pub(crate) async fn handle_select_channel(
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
     mark_active_window_read(state, ui);
+    // With a recent page on its way, the divider waits for the merge.
     if fetch_recent {
         load_and_show_recent_history(state, ui, &key).await;
     }
+    unread_divider::refresh(state, ui);
     sync_window_ignores(state, ui).await;
 }
 
