@@ -877,6 +877,55 @@ mod tests {
         }
     }
 
+    /// A table of `samples` samples with `chunks` chunks and the given run words.
+    fn table_with_many_chunks(samples: u32, chunks: u32, runs: &[u32]) -> Vec<u8> {
+        let mut offsets = vec![chunks];
+        offsets.extend((0..chunks).map(|chunk| 100 + chunk * 10));
+        let mut stbl = Vec::new();
+        for part in [
+            full(b"stsz", &[10, samples]),
+            full(b"stsc", runs),
+            full(b"stco", &offsets),
+            full(b"stts", &[1, samples, 1000]),
+        ] {
+            stbl.extend_from_slice(&part);
+        }
+        stbl
+    }
+
+    #[test]
+    fn alternating_runs_over_many_chunks_are_refused() {
+        // The run order fails at the second run, before any chunk scan.
+        let mut runs = vec![400];
+        for run in 0..400u32 {
+            runs.extend_from_slice(&[if run % 2 == 0 { 400 } else { 1 }, 1, 1]);
+        }
+        let stbl = table_with_many_chunks(2, 400, &runs);
+        assert!(sample_list(&boxes(&stbl), 1000).is_err());
+        // The same table with increasing runs is valid, so only the run order
+        // causes the error above.
+        let mut runs = vec![400];
+        for run in 1..=400u32 {
+            runs.extend_from_slice(&[run, 1, 1]);
+        }
+        let stbl = table_with_many_chunks(2, 400, &runs);
+        assert!(sample_list(&boxes(&stbl), 1000).is_ok());
+    }
+
+    #[test]
+    fn many_valid_runs_stop_at_the_sample_count() {
+        // Three samples are enough: the parser stops in the third chunk, and
+        // the huge per-chunk count of the last run is never used.
+        let mut runs = vec![400];
+        for run in 1..=400u32 {
+            runs.extend_from_slice(&[run, if run == 400 { u32::MAX } else { 1 }, 1]);
+        }
+        let stbl = table_with_many_chunks(3, 400, &runs);
+        let list = sample_list(&boxes(&stbl), 1000).expect("table");
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[2].offset, 120);
+    }
+
     #[test]
     fn a_run_count_larger_than_the_box_is_refused() {
         let stbl = table_with_runs(&[u32::MAX, 1, 1, 1]);
