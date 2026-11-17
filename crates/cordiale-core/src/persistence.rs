@@ -34,7 +34,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -917,6 +917,33 @@ pub fn save_settings(settings: &Settings) -> Result<(), PersistenceError> {
     save_json(SETTINGS_FILE_NAME, settings)
 }
 
+/// Orders every read-modify-write of the settings file in this process.
+static SETTINGS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Reads the latest settings, lets `change` edit them and saves the result,
+/// all while holding one lock. Two updates cannot overwrite each other, and
+/// only the fields `change` touches differ from the file. Use it instead of
+/// `load_settings` then `save_settings`, above all after an `await`.
+pub fn update_settings(change: impl FnOnce(&mut Settings)) -> Result<(), PersistenceError> {
+    update_settings_with(load_settings, save_settings, change)
+}
+
+/// The locked read-modify-write behind `update_settings`. Like the callers
+/// it replaces, it starts from the default when the file cannot be read
+/// (a corrupt file is already set aside by `load_settings`).
+fn update_settings_with(
+    load: impl FnOnce() -> Result<Settings, PersistenceError>,
+    save: impl FnOnce(&Settings) -> Result<(), PersistenceError>,
+    change: impl FnOnce(&mut Settings),
+) -> Result<(), PersistenceError> {
+    let _guard = SETTINGS_UPDATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = load().unwrap_or_default();
+    change(&mut settings);
+    save(&settings)
+}
+
 pub fn load_servers_file() -> Result<ServersFile, PersistenceError> {
     load_json(SERVERS_FILE_NAME)
 }
@@ -1385,6 +1412,98 @@ mod tests {
             redact_secrets(message),
             "token=[redacted] retry token=[redacted]"
         );
+    }
+
+    /// `update_settings_with` on the file at `path`.
+    fn update_file(path: &Path, change: impl FnOnce(&mut Settings)) {
+        update_settings_with(
+            || load_json_from(path),
+            |settings| {
+                let contents = serde_json::to_string_pretty(settings)?;
+                write_atomic(path, contents.as_bytes())?;
+                Ok(())
+            },
+            change,
+        )
+        .expect("update settings");
+    }
+
+    #[test]
+    fn a_late_theme_update_keeps_the_settings_saved_while_it_waited() {
+        let dir = scratch_dir("theme-update-keeps-settings");
+        let path = dir.join("settings.json");
+        update_file(&path, |settings| settings.font_size_percent = 100);
+
+        // The server request is pending: other settings are saved meanwhile.
+        update_file(&path, |settings| {
+            settings.language = Some(Language::It);
+            settings.font_size_percent = 130;
+            settings.window = Some(WindowState {
+                width: Some(1000),
+                height: Some(700),
+                x: Some(12),
+                y: Some(34),
+                ..WindowState::default()
+            });
+        });
+
+        // The response arrives: only the theme field changes.
+        update_file(&path, |settings| {
+            settings.color_theme = Some("server".to_string());
+        });
+
+        let saved: Settings = load_json_from(&path).expect("reload");
+        assert_eq!(saved.color_theme.as_deref(), Some("server"));
+        assert_eq!(saved.language, Some(Language::It));
+        assert_eq!(saved.font_size_percent, 130);
+        let window = saved.window.expect("window state");
+        assert_eq!(
+            (window.width, window.height, window.x, window.y),
+            (Some(1000), Some(700), Some(12), Some(34))
+        );
+        assert_eq!(entry_names(&dir), vec!["settings.json".to_string()]);
+    }
+
+    #[test]
+    fn overlapping_theme_updates_end_with_the_last_one_applied() {
+        let dir = scratch_dir("theme-update-overlap");
+        let path = dir.join("settings.json");
+
+        update_file(&path, |settings| {
+            settings.color_theme = Some("builtin:sux".to_string());
+        });
+        update_file(&path, |settings| {
+            settings.color_theme = Some("server".to_string());
+        });
+
+        let saved: Settings = load_json_from(&path).expect("reload");
+        assert_eq!(saved.color_theme.as_deref(), Some("server"));
+    }
+
+    #[test]
+    fn concurrent_updates_do_not_lose_each_other() {
+        let dir = scratch_dir("theme-update-threads");
+        let path = dir.join("settings.json");
+        update_file(&path, |_| {});
+
+        let language = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..25 {
+                    update_file(&path, |settings| settings.font_size_percent = 140);
+                }
+            })
+        };
+        for _ in 0..25 {
+            update_file(&path, |settings| {
+                settings.color_theme = Some("server".to_string());
+            });
+        }
+        language.join().expect("thread");
+
+        let saved: Settings = load_json_from(&path).expect("reload");
+        assert_eq!(saved.color_theme.as_deref(), Some("server"));
+        assert_eq!(saved.font_size_percent, 140);
     }
 
     /// An empty, uniquely named folder under the system temp dir.
