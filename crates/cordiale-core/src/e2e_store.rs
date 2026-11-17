@@ -226,6 +226,8 @@ pub struct E2eHistoryStore {
     messages: Vec<E2eMessage>,
     /// Number of records in the file; the next record gets this index.
     records: u64,
+    /// Bytes of a partial final record that `open` cut off, if any.
+    recovered_tail: Option<usize>,
 }
 
 impl E2eHistoryStore {
@@ -265,13 +267,22 @@ impl E2eHistoryStore {
             key,
             messages: Vec::new(),
             records: 0,
+            recovered_tail: None,
         };
         if store.path.exists() {
-            let (rows, records) = store.read_file()?;
+            let (rows, records, tail) = store.read_file()?;
             store.messages = rows;
             store.records = records;
+            store.recovered_tail = tail;
         }
         Ok(store)
+    }
+
+    /// Size in bytes of a partial final record that `open` removed from the
+    /// file, for example after an interrupted write. The removed bytes stay
+    /// in a `.tail` file next to the history. `None` when the file was whole.
+    pub fn recovered_tail(&self) -> Option<usize> {
+        self.recovered_tail
     }
 
     /// Adds one row as one new record. On a write failure the row is not
@@ -431,19 +442,54 @@ impl E2eHistoryStore {
         Ok(out)
     }
 
-    fn read_file(&self) -> Result<(Vec<E2eMessage>, u64), E2eStoreError> {
+    /// Reads every complete record. A partial final record (an interrupted
+    /// append) is cut off: its bytes go to a `.tail` file and the valid
+    /// records stay. Any complete record that does not decrypt is an error.
+    fn read_file(&self) -> Result<(Vec<E2eMessage>, u64, Option<usize>), E2eStoreError> {
         let data = fs::read(&self.path)?;
         let mut rows = Vec::new();
-        if let Err(err) = self.read_records(&data, &mut rows) {
-            wipe(rows);
-            return Err(err);
-        }
+        let valid_end = match self.read_records(&data, &mut rows) {
+            Ok(end) => end,
+            Err(err) => {
+                wipe(rows);
+                return Err(err);
+            }
+        };
+        let tail = if valid_end < data.len() {
+            let cut = self.cut_tail(&data, valid_end);
+            if let Err(err) = cut {
+                wipe(rows);
+                return Err(err);
+            }
+            Some(data.len() - valid_end)
+        } else {
+            None
+        };
         let records = rows.len() as u64;
         rows.sort_by_key(|row| row.sent_at);
-        Ok((rows, records))
+        Ok((rows, records, tail))
     }
 
-    fn read_records(&self, data: &[u8], rows: &mut Vec<E2eMessage>) -> Result<(), E2eStoreError> {
+    /// Saves the partial tail beside the file, then cuts the file back to
+    /// the end of the last complete record.
+    fn cut_tail(&self, data: &[u8], valid_end: usize) -> Result<(), E2eStoreError> {
+        let mut tail_path = self.path.clone().into_os_string();
+        tail_path.push(".tail");
+        write_atomic(Path::new(&tail_path), &data[valid_end..])?;
+        let file = OpenOptions::new().write(true).open(&self.path)?;
+        file.set_len(valid_end as u64)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Returns the offset where the last complete record ends. Input that
+    /// stops inside the header or the body of the final record is a partial
+    /// append, not corruption.
+    fn read_records(
+        &self,
+        data: &[u8],
+        rows: &mut Vec<E2eMessage>,
+    ) -> Result<usize, E2eStoreError> {
         let corrupted = || E2eStoreError::Corrupted;
         if !data.starts_with(MAGIC) {
             return Err(corrupted());
@@ -452,14 +498,14 @@ impl E2eHistoryStore {
         let mut rest = &data[MAGIC.len()..];
         while !rest.is_empty() {
             if rest.len() < LEN_FIELD + NONCE_LEN {
-                return Err(corrupted());
+                break;
             }
             let len = u32::from_le_bytes(
                 <[u8; LEN_FIELD]>::try_from(&rest[..LEN_FIELD]).map_err(|_| corrupted())?,
             ) as usize;
             let body = &rest[LEN_FIELD..];
             if body.len() - NONCE_LEN < len {
-                return Err(corrupted());
+                break;
             }
             let nonce = Nonce::<XChaCha20Poly1305>::try_from(&body[..NONCE_LEN])
                 .map_err(|_| corrupted())?;
@@ -478,7 +524,7 @@ impl E2eHistoryStore {
             rows.push(parsed?);
             rest = &body[NONCE_LEN + len..];
         }
-        Ok(())
+        Ok(data.len() - rest.len())
     }
 
     /// Writes one record at the end of the file. A failed write cuts the
@@ -658,18 +704,57 @@ mod tests {
     }
 
     #[test]
-    fn a_record_cut_short_is_an_error() {
+    fn a_record_cut_short_keeps_the_earlier_records() {
         let dir = scratch_dir("cut-short");
         let path = dir.join("history.bin");
         let provider = fresh_key();
         let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
         store.append(message("1", "c", "one")).expect("append");
+        store.append(message("2", "c", "two")).expect("append");
+        let good_len = fs::metadata(&path).expect("meta").len();
+        store.append(message("3", "c", "three")).expect("append");
+        store.close();
+        // Cut inside the body, then inside the header, of the last record.
+        for body_cut in [true, false] {
+            let mut data = fs::read(&path).expect("read");
+            let new_len = if body_cut {
+                data.len() - 3
+            } else {
+                good_len as usize + 5
+            };
+            data.truncate(new_len);
+            fs::write(&path, &data).expect("write");
+            let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("recover");
+            assert_eq!(store.messages("c").len(), 2);
+            assert!(store.recovered_tail().is_some());
+            assert_eq!(fs::metadata(&path).expect("meta").len(), good_len);
+            // The store accepts new records after the recovery.
+            store.append(message("3", "c", "three")).expect("append");
+            store.close();
+            let store = E2eHistoryStore::open(path.clone(), &provider).expect("reopen");
+            assert_eq!(store.messages("c").len(), 3);
+            assert!(store.recovered_tail().is_none());
+            store.close();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_complete_record_is_still_an_error() {
+        let dir = scratch_dir("complete-bad");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        store.append(message("1", "c", "one")).expect("append");
+        let first_end = fs::metadata(&path).expect("meta").len() as usize;
+        store.append(message("2", "c", "two")).expect("append");
         store.close();
         let mut data = fs::read(&path).expect("read");
-        data.truncate(data.len() - 3);
-        fs::write(&path, data).expect("write");
-        let result = E2eHistoryStore::open(path, &provider);
+        data[first_end + LEN_FIELD + NONCE_LEN] ^= 0xff;
+        fs::write(&path, &data).expect("write");
+        let result = E2eHistoryStore::open(path.clone(), &provider);
         assert!(matches!(result, Err(E2eStoreError::Corrupted)));
+        assert_eq!(fs::read(&path).expect("read"), data);
         let _ = fs::remove_dir_all(&dir);
     }
 

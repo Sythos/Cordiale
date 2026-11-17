@@ -4129,6 +4129,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn engine_opens_after_a_truncated_history_append() {
+        let ident = Ident::new("truncated-history");
+        drop(ident.engine());
+        let history_path = ident.dir.join("history.bin");
+        let mut history =
+            E2eHistoryStore::open(history_path.clone(), &FixedKey([9; 32])).expect("history");
+        for (index, text) in ["one", "two"].into_iter().enumerate() {
+            history
+                .append(E2eMessage {
+                    id: format!("{index}"),
+                    conversation_id: "conv".to_string(),
+                    sender_device: "device-a".to_string(),
+                    sent_at: index as i64,
+                    text: text.to_string(),
+                    encrypted: true,
+                    captures: Vec::new(),
+                })
+                .expect("append");
+        }
+        history.close();
+        let mut data = std::fs::read(&history_path).expect("read");
+        data.truncate(data.len() - 3);
+        std::fs::write(&history_path, data).expect("write");
+        // The second record is now partial; the engine still opens.
+        drop(ident.engine());
+        let history = E2eHistoryStore::open(history_path, &FixedKey([9; 32])).expect("reopen");
+        assert_eq!(history.messages("conv").len(), 1);
+    }
+
     fn row(
         id: u64,
         from: &str,
