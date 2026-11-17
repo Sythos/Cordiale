@@ -475,6 +475,13 @@ fn vint(data: &[u8], at: usize, keep_marker: bool) -> Option<(Option<u64>, usize
     Some((Some(value), length))
 }
 
+/// An EBML lace size at `at`: the value and its length. All-ones is a valid
+/// value here, not the "unknown" size of an element.
+fn lace_vint(data: &[u8], at: usize) -> Option<(u64, usize)> {
+    let (value, length) = vint(data, at, true)?;
+    Some((value? & ((1u64 << (7 * length)) - 1), length))
+}
+
 #[derive(Default)]
 struct Entry {
     number: u64,
@@ -529,26 +536,23 @@ fn lace_frames(payload: &[u8], lacing: u8) -> Result<Vec<(usize, usize)>, String
         // Fixed size: the frames share the payload equally.
         2 => {
             let rest = payload.len() - at;
-            if rest % count != 0 {
+            if !rest.is_multiple_of(count) {
                 return Err("fixed-size lacing does not divide the payload".to_string());
             }
             sizes.resize(count - 1, rest / count);
         }
         // EBML: the first size, then signed differences.
         _ => {
-            let (first, length) = vint(payload, at, false).ok_or("truncated EBML lacing sizes")?;
+            let (first, length) = lace_vint(payload, at).ok_or("truncated EBML lacing sizes")?;
             at += length;
-            let mut size = i64::try_from(first.ok_or("EBML lacing size is unknown")?)
-                .map_err(|_| "EBML frame size overflows")?;
+            let mut size = i64::try_from(first).map_err(|_| "EBML frame size overflows")?;
             if count > 1 {
                 sizes.push(usize::try_from(size).map_err(|_| "EBML frame size overflows")?);
             }
             for _ in 2..count {
-                let (raw, length) =
-                    vint(payload, at, false).ok_or("truncated EBML lacing sizes")?;
+                let (raw, length) = lace_vint(payload, at).ok_or("truncated EBML lacing sizes")?;
                 at += length;
-                let raw = i64::try_from(raw.ok_or("EBML lacing size is unknown")?)
-                    .map_err(|_| "EBML frame size overflows")?;
+                let raw = i64::try_from(raw).map_err(|_| "EBML frame size overflows")?;
                 let bias = (1i64 << (7 * length - 1)) - 1;
                 size = size
                     .checked_add(raw - bias)
@@ -1328,6 +1332,17 @@ mod tests {
             lace_frames(&[1, 0x82, 5, 5, 5], 3).unwrap(),
             vec![(2, 2), (4, 1)]
         );
+        // An EBML size with all bits set is a value: 127 bytes.
+        let mut ebml = vec![1, 0xFF];
+        ebml.extend(vec![0u8; 128]);
+        assert_eq!(lace_frames(&ebml, 3).unwrap(), vec![(2, 127), (129, 1)]);
+        // A difference of +64 is also all ones: sizes 1, 65 and 1.
+        let mut ebml = vec![2, 0x81, 0xFF];
+        ebml.extend(vec![0u8; 67]);
+        assert_eq!(
+            lace_frames(&ebml, 3).unwrap(),
+            vec![(3, 1), (4, 65), (69, 1)]
+        );
         // A Xiph size of 255 continues in the next byte.
         let mut xiph = vec![1, 255, 1];
         xiph.extend(vec![0u8; 257]);
@@ -1343,7 +1358,7 @@ mod tests {
         assert!(lace_frames(&[1, 9, 1], 1).is_err());
         // Fixed size that does not divide the payload.
         assert!(lace_frames(&[1, 1, 2, 3], 2).is_err());
-        // EBML: truncated, unknown size, negative size.
+        // EBML: truncated, frame past the block, negative size.
         assert!(lace_frames(&[2, 0x81], 3).is_err());
         assert!(lace_frames(&[1, 0xFF, 1], 3).is_err());
         assert!(lace_frames(&[2, 0x81, 0x80, 1, 1], 3).is_err());
