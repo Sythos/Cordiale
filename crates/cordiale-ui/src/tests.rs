@@ -18188,6 +18188,18 @@ fn unread_divider_goes_before_the_first_message_after_the_cursor() {
 }
 
 #[test]
+fn unread_divider_follows_the_display_order_not_the_lowest_id() {
+    let rows = vec![
+        history_row(Some(12), Some(100)),
+        history_row(Some(11), Some(200)),
+    ];
+    assert_eq!(
+        unread_divider::first_unread(&rows, 10, false),
+        Some((12, 2))
+    );
+}
+
+#[test]
 fn unread_divider_is_absent_when_every_message_is_read() {
     let rows = unread_rows(&[10, 11, 12]);
     assert_eq!(unread_divider::first_unread(&rows, 12, false), None);
