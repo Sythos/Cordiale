@@ -13784,6 +13784,60 @@ fn read_cursor_set_is_last_write_wins_even_when_cursor_moves_backward() {
 }
 
 #[test]
+fn read_cursor_push_confirms_only_the_matching_window_and_never_moves_back() {
+    let channel_a = channel_topic("sythos", "libera", "#rust");
+    let channel_b = channel_topic("sythos", "libera", "#other");
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("sythos".to_string());
+    let key_a = window_state_key("libera", "#rust");
+    let key_b = window_state_key("libera", "#other");
+    state.windows.read_cursors.insert(key_a.clone(), 50);
+    state.windows.read_cursors.insert(key_b.clone(), 50);
+    {
+        let mut sync = state.windows.read_cursor_sync.lock().unwrap();
+        sync.queue(key_a.clone(), "#rust", 50);
+        sync.queue(key_b.clone(), "#other", 50);
+    }
+    let push = |id: i64| {
+        serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": id,
+            "badge_count": 0
+        })
+    };
+
+    // An older push leaves the pending update and the local cursor alone.
+    apply_read_cursor_set(&mut state, "sythos", &channel_a, &push(40));
+    assert_eq!(state.windows.read_cursors.get(&key_a), Some(&50));
+    assert_eq!(
+        state
+            .windows
+            .read_cursor_sync
+            .lock()
+            .unwrap()
+            .pending_id(&key_a),
+        Some(50)
+    );
+
+    // A matching push confirms its own window only.
+    apply_read_cursor_set(&mut state, "sythos", &channel_a, &push(50));
+    let sync = state.windows.read_cursor_sync.lock().unwrap();
+    assert_eq!(sync.pending_id(&key_a), None);
+    assert_eq!(sync.pending_id(&key_b), Some(50));
+    drop(sync);
+    apply_read_cursor_set(&mut state, "sythos", &channel_b, &push(50));
+    assert_eq!(
+        state
+            .windows
+            .read_cursor_sync
+            .lock()
+            .unwrap()
+            .pending_id(&key_b),
+        None
+    );
+}
+
+#[test]
 fn read_cursors_are_seeded_from_me_without_fabricating_invalid_entries() {
     let payload = serde_json::json!({
         "libera": {
