@@ -5438,9 +5438,17 @@ export component AppWindow inherits Window {
                     let average = self.content-height / max(1, chat-lines.length);
                     self.content-y = max(bottom, min(0px, -(unread-start-row + 0.5) * average));
                     self.follow-bottom = self.content-y <= bottom + 4px;
+                    // At the bottom the pane follows the newest line again.
+                    // While Rust holds, the start row can still move.
+                    if self.follow-bottom && !unread-start-hold {
+                        placing = false;
+                    }
                 }
                 changed start-row => { place-unread(); }
                 changed start-hold => {
+                    if !start-hold && placing && self.follow-bottom {
+                        placing = false;
+                    }
                     // No unread message was found: open on the newest line.
                     if !start-hold && unread-start-row < 0 && !unread-divider-dismissed {
                         placing = false;
@@ -5526,6 +5534,9 @@ export component AppWindow inherits Window {
                     if resuming {
                         resuming = false;
                         chat-resume-landed();
+                    } else if placing && self.follow-bottom && !unread-start-hold {
+                        placing = false;
+                        self.content-y = min(0px, self.visible-height - self.content-height);
                     } else if placing && !unread-divider-dismissed {
                         place-unread();
                     } else if self.follow-bottom {
