@@ -50,6 +50,66 @@ use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPI
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// The longest wait for the reply to a heartbeat. A connection with no reply
+/// by then is treated as dead and the session reconnects.
+const HEARTBEAT_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The heartbeat of one connection: the ref of the heartbeat that has no
+/// reply yet, and the time it was sent. Every connection makes a new one, so
+/// a late reply of an older socket never reaches it. Pure bookkeeping, so the
+/// rules are testable without a socket.
+#[derive(Debug, Default)]
+struct HeartbeatWatch {
+    pending: Option<(String, Instant)>,
+}
+
+impl HeartbeatWatch {
+    /// Records a heartbeat sent at `now`. An older heartbeat that still has
+    /// no reply keeps its time, so a new heartbeat never extends the wait.
+    fn sent(&mut self, message_ref: Option<String>, now: Instant) {
+        if self.pending.is_none() {
+            if let Some(message_ref) = message_ref {
+                self.pending = Some((message_ref, now));
+            }
+        }
+    }
+
+    /// Clears the wait when `message` is the reply to the pending heartbeat.
+    fn reply(&mut self, message: &PhoenixMessage) -> bool {
+        let matches = message.topic == HEARTBEAT_TOPIC
+            && message.event == "phx_reply"
+            && matches!(
+                (&self.pending, message.message_ref.as_deref()),
+                (Some((pending, _)), Some(received)) if pending == received
+            );
+        if matches {
+            self.pending = None;
+        }
+        matches
+    }
+
+    /// The time after which the pending heartbeat counts as lost.
+    fn deadline(&self, timeout: Duration) -> Option<Instant> {
+        self.pending.as_ref().map(|(_, sent_at)| *sent_at + timeout)
+    }
+}
+
+/// Heartbeat timing of a session.
+#[derive(Debug, Clone, Copy)]
+struct HeartbeatTiming {
+    interval: Duration,
+    reply_timeout: Duration,
+}
+
+impl Default for HeartbeatTiming {
+    fn default() -> Self {
+        Self {
+            interval: HEARTBEAT_INTERVAL,
+            reply_timeout: HEARTBEAT_REPLY_TIMEOUT,
+        }
+    }
+}
+
 /// How often a foreground report is repeated. Grappa stops trusting a
 /// `visible` report after about 60 s, so this has to stay at or under half
 /// of that.
@@ -308,6 +368,15 @@ pub fn spawn_session(
     token: String,
     user: String,
 ) -> (SessionHandle, mpsc::UnboundedReceiver<SessionEvent>) {
+    spawn_session_timed(ws_url, token, user, HeartbeatTiming::default())
+}
+
+fn spawn_session_timed(
+    ws_url: String,
+    token: String,
+    user: String,
+    timing: HeartbeatTiming,
+) -> (SessionHandle, mpsc::UnboundedReceiver<SessionEvent>) {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -319,6 +388,7 @@ pub fn spawn_session(
         command_rx,
         event_tx,
         shutdown_rx,
+        timing,
     ));
 
     (
@@ -561,6 +631,7 @@ async fn run_session(
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
     events: mpsc::UnboundedSender<SessionEvent>,
     mut shutdown: watch::Receiver<bool>,
+    timing: HeartbeatTiming,
 ) {
     let user_topic = format!("grappa:user:{user}");
     // Every joined topic, including the user topic itself, keyed to the
@@ -674,8 +745,9 @@ async fn run_session(
             }
         }
 
-        let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+        let mut heartbeat = interval(timing.interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut heartbeat_watch = HeartbeatWatch::default();
         let mut visibility_resend = interval(VISIBILITY_RESEND_INTERVAL);
         visibility_resend.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -701,6 +773,26 @@ async fn run_session(
                         }
                         continue 'reconnect;
                     }
+                    heartbeat_watch.sent(heartbeat_msg.message_ref.clone(), Instant::now());
+                }
+
+                // No reply to a heartbeat in time: the path is dead even
+                // though the socket is still open.
+                _ = async {
+                    match heartbeat_watch.deadline(timing.reply_timeout) {
+                        Some(due) => tokio::time::sleep_until(due.into()).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let retry_in = backoff.next_delay(uptime(joined_at), None, random_unit());
+                    let _ = events.send(SessionEvent::Disconnected {
+                        reason: "heartbeat reply missing".to_string(),
+                        retry_in,
+                    });
+                    if !wait_before_reconnect(retry_in, &mut shutdown).await {
+                        return;
+                    }
+                    continue 'reconnect;
                 }
 
                 _ = async {
@@ -805,6 +897,7 @@ async fn run_session(
                 frame = socket.next_message() => {
                     match frame {
                         Ok(Some(message)) => {
+                            heartbeat_watch.reply(&message);
                             // The answer to an automatic rejoin of a topic
                             // other than the user topic.
                             if message.topic != user_topic && message.event == "phx_reply" {
@@ -1588,6 +1681,168 @@ mod tests {
             }
         }
         assert_eq!(net_joins, 1);
+
+        handle.shutdown();
+        server.abort();
+    }
+
+    fn heartbeat_reply(message_ref: &str) -> PhoenixMessage {
+        PhoenixMessage {
+            join_ref: None,
+            message_ref: Some(message_ref.to_string()),
+            topic: HEARTBEAT_TOPIC.to_string(),
+            event: "phx_reply".to_string(),
+            payload: serde_json::json!({"status": "ok", "response": {}}),
+        }
+    }
+
+    #[test]
+    fn a_timely_heartbeat_reply_clears_the_wait() {
+        let timeout = Duration::from_secs(15);
+        let now = Instant::now();
+        let mut watch = HeartbeatWatch::default();
+        assert!(watch.deadline(timeout).is_none());
+        watch.sent(Some("7".to_string()), now);
+        assert_eq!(watch.deadline(timeout), Some(now + timeout));
+        assert!(watch.reply(&heartbeat_reply("7")));
+        assert!(watch.deadline(timeout).is_none());
+    }
+
+    #[test]
+    fn a_missing_heartbeat_reply_keeps_its_deadline() {
+        let timeout = Duration::from_secs(15);
+        let now = Instant::now();
+        let mut watch = HeartbeatWatch::default();
+        watch.sent(Some("7".to_string()), now);
+        // A later heartbeat does not move the deadline.
+        watch.sent(Some("8".to_string()), now + Duration::from_secs(5));
+        assert_eq!(watch.deadline(timeout), Some(now + timeout));
+    }
+
+    #[test]
+    fn a_reply_of_another_heartbeat_or_topic_is_ignored() {
+        let now = Instant::now();
+        let mut watch = HeartbeatWatch::default();
+        watch.sent(Some("7".to_string()), now);
+        // The ref of a heartbeat of an older connection.
+        assert!(!watch.reply(&heartbeat_reply("3")));
+        let mut other_topic = heartbeat_reply("7");
+        other_topic.topic = "grappa:user:bob".to_string();
+        assert!(!watch.reply(&other_topic));
+        assert!(watch.deadline(Duration::from_secs(1)).is_some());
+        // A new connection has a new watch: an old reply finds no wait.
+        let mut fresh = HeartbeatWatch::default();
+        assert!(!fresh.reply(&heartbeat_reply("7")));
+        assert!(fresh.deadline(Duration::from_secs(1)).is_none());
+    }
+
+    /// A mock Grappa that accepts connections one after the other. It
+    /// acknowledges every join. It ignores heartbeats on the first
+    /// connection and answers them on later ones. It reports the number of
+    /// each accepted connection.
+    async fn mock_silent_then_answering_server() -> (
+        String,
+        mpsc::UnboundedReceiver<u32>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!(
+            "ws://{}/socket/websocket",
+            listener.local_addr().expect("address")
+        );
+        let (connections_tx, connections_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut number = 0;
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                number += 1;
+                let _ = connections_tx.send(number);
+                #[allow(clippy::result_large_err)]
+                let select_phoenix = |_request: &Request,
+                                      mut response: Response|
+                 -> Result<Response, ErrorResponse> {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("phoenix"),
+                    );
+                    Ok(response)
+                };
+                let mut socket = tokio_tungstenite::accept_hdr_async(stream, select_phoenix)
+                    .await
+                    .expect("handshake");
+                let answers = number >= 2;
+                tokio::spawn(async move {
+                    while let Some(Ok(Message::Text(text))) = socket.next().await {
+                        let frame = PhoenixMessage::from_json(text.as_str()).expect("frame");
+                        let reply = if frame.event == "phx_join" {
+                            PhoenixMessage {
+                                join_ref: frame.join_ref.clone(),
+                                message_ref: frame.message_ref.clone(),
+                                topic: frame.topic.clone(),
+                                event: "phx_reply".to_string(),
+                                payload: serde_json::json!({"status": "ok", "response": {}}),
+                            }
+                        } else if frame.event == HEARTBEAT_EVENT && answers {
+                            heartbeat_reply(&frame.message_ref.clone().unwrap_or_default())
+                        } else {
+                            continue;
+                        };
+                        let _ = socket
+                            .send(Message::from(reply.to_json().expect("json")))
+                            .await;
+                    }
+                });
+            }
+        });
+        (url, connections_rx, server)
+    }
+
+    #[tokio::test]
+    async fn a_missing_heartbeat_reply_reconnects_once_and_recovers() {
+        let (url, mut connections, server) = mock_silent_then_answering_server().await;
+        let timing = HeartbeatTiming {
+            interval: Duration::from_millis(100),
+            reply_timeout: Duration::from_millis(300),
+        };
+        let (handle, mut events) =
+            spawn_session_timed(url, "token".to_string(), "bob".to_string(), timing);
+
+        // The first connection joins, then gets no heartbeat reply.
+        assert!(matches!(
+            next_event(&mut events).await,
+            SessionEvent::Connected { .. }
+        ));
+        match next_event(&mut events).await {
+            SessionEvent::Disconnected { reason, .. } => {
+                assert_eq!(reason, "heartbeat reply missing")
+            }
+            other => panic!("expected a disconnect: {other:?}"),
+        }
+        // The existing reconnect path restores the session.
+        assert!(matches!(
+            next_event(&mut events).await,
+            SessionEvent::Connected { .. }
+        ));
+        // The second connection answers: it stays up for several intervals.
+        let end = tokio::time::Instant::now() + Duration::from_millis(1200);
+        while let Ok(event) = tokio::time::timeout_at(end, next_event(&mut events)).await {
+            match event {
+                SessionEvent::Frame(frame) if frame.topic == HEARTBEAT_TOPIC => {}
+                other => panic!("the answered session must stay up: {other:?}"),
+            }
+        }
+        let mut accepted = 0;
+        while let Ok(number) = connections.try_recv() {
+            accepted = number;
+        }
+        assert_eq!(accepted, 2);
 
         handle.shutdown();
         server.abort();
