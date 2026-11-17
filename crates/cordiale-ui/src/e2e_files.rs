@@ -401,6 +401,9 @@ pub(crate) fn open_e2e_file(
         }
     };
     let ui = ui.clone();
+    // The flag of this session: a disconnect or a new sign-in cancels it, and
+    // the result of this request is then dropped.
+    let session = Arc::clone(&state.conn.shrink_cancel);
     tokio::spawn(async move {
         let name = valid.name.clone();
         let ciphertext = match client.fetch_encrypted_file(&valid).await {
@@ -414,7 +417,9 @@ pub(crate) fn open_e2e_file(
                     Some(404 | 410) => "e2e-file-expired",
                     _ => "e2e-file-open-failed",
                 };
-                set_attach_status(&ui, kind, name);
+                if !session.is_cancelled() {
+                    set_attach_status(&ui, kind, name);
+                }
                 return;
             }
         };
@@ -422,21 +427,47 @@ pub(crate) fn open_e2e_file(
             Ok(plain) => plain,
             Err(error) => {
                 persistence::log_line(&format!("encrypted file refused: {error}"));
-                set_attach_status(&ui, open_error_status(error), name);
+                if !session.is_cancelled() {
+                    set_attach_status(&ui, open_error_status(error), name);
+                }
                 return;
             }
         };
-        show_decrypted(&ui, &valid, plain);
+        show_decrypted(&ui, &valid, plain, session);
     });
 }
 
-/// Shows a decrypted file by its type.
-fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain: Vec<u8>) {
+/// True when the session that started the request has ended. The result is
+/// then dropped, and the temporary file of the result, if any, is removed.
+fn drop_if_stale(session: &CancelFlag, temp: Option<&std::path::Path>) -> bool {
+    let stale = session.is_cancelled();
+    if stale {
+        if let Some(path) = temp {
+            temp_files::discard(path);
+        }
+    }
+    stale
+}
+
+/// Shows a decrypted file by its type. A result of an ended session is
+/// dropped.
+fn show_decrypted(
+    ui: &slint::Weak<AppWindow>,
+    file: &e2e_file::ValidFile,
+    plain: Vec<u8>,
+    session: Arc<CancelFlag>,
+) {
+    if drop_if_stale(&session, None) {
+        return;
+    }
     let (name, url) = (file.name.clone(), file.url.to_string());
     match open_for_size(&file.mime, plain.len()) {
         OpenWith::Image(extension) => {
             let written = temp_files::write_private("e2e-media", &format!(".{extension}"), &plain);
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                if drop_if_stale(&session, written.as_deref().ok()) {
+                    return;
+                }
                 media_player::end();
                 media_save::forget();
                 ui.set_media_saveable(false);
@@ -469,6 +500,9 @@ fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain
             // to the save dialog, so the whole file stays reachable.
             let shown = String::from_utf8_lossy(&plain).into_owned();
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                if drop_if_stale(&session, None) {
+                    return;
+                }
                 media_player::end();
                 media_save::forget();
                 ui.set_media_saveable(false);
@@ -484,6 +518,9 @@ fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain
         OpenWith::Save => {
             // The dialog runs on the UI thread, as the Download button does.
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                if drop_if_stale(&session, None) {
+                    return;
+                }
                 let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() else {
                     return;
                 };
@@ -503,6 +540,42 @@ mod tests {
     use cordiale_core::e2e_file::FileError;
 
     const SERVER: &str = "https://irc.example";
+
+    #[test]
+    fn a_result_of_the_active_session_is_kept_with_its_temporary_file() {
+        let session = CancelFlag::default();
+        // Own directory: the shared private directory can be removed by
+        // another test that runs at the same time.
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("e2e-media.png");
+        std::fs::write(&path, b"plain").unwrap();
+        assert!(!drop_if_stale(&session, Some(&path)));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_result_after_a_disconnect_is_dropped_and_its_file_is_removed() {
+        // A disconnect cancels the flag of the session.
+        let session = CancelFlag::default();
+        session.cancel();
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("e2e-media.png");
+        std::fs::write(&path, b"plain").unwrap();
+        assert!(drop_if_stale(&session, Some(&path)));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_result_after_an_account_switch_is_dropped() {
+        // `cancel_video_shrinks` cancels the old flag and gives the next
+        // session a new one: the request keeps the old flag.
+        let first = std::sync::Arc::new(CancelFlag::default());
+        let request = std::sync::Arc::clone(&first);
+        first.cancel();
+        let second = std::sync::Arc::new(CancelFlag::default());
+        assert!(drop_if_stale(&request, None));
+        assert!(!drop_if_stale(&second, None));
+    }
 
     #[test]
     fn only_a_server_with_protocol_58_takes_encrypted_files() {
