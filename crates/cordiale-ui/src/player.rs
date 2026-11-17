@@ -276,6 +276,30 @@ fn start_stream(
     });
 }
 
+/// How often a blocked read looks at the cancel flag.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// A stream that sends no byte for this long has failed.
+const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hands `audio` to the decoder. Waits while the decoder is behind, but
+/// gives up on a cancel or when the decoder is gone. `false` means stop.
+fn send_audio(bytes: &SyncSender<Vec<u8>>, mut audio: Vec<u8>, cancelled: &AtomicBool) -> bool {
+    loop {
+        match bytes.try_send(audio) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(back)) => {
+                if cancelled.load(Ordering::Relaxed) {
+                    return false;
+                }
+                audio = back;
+                // This runtime runs nothing else.
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 fn network_thread(
     url: String,
     allow_local: bool,
@@ -295,25 +319,58 @@ fn network_thread(
         }
     };
     runtime.block_on(async {
-        let mut stream = match RadioStream::open(&url, allow_local).await {
+        // Open and read in short steps, so a cancel is seen within
+        // `CANCEL_POLL` even when the server sends nothing.
+        let mut open = Box::pin(RadioStream::open(&url, allow_local));
+        let opened = loop {
+            match tokio::time::timeout(CANCEL_POLL, &mut open).await {
+                Ok(result) => break result,
+                Err(_) => {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+            }
+        };
+        let mut stream = match opened {
             Ok(stream) => stream,
             Err(err) => {
-                on_event(generation, PlayerEvent::Failed(err.to_string()));
+                if !cancelled.load(Ordering::Relaxed) {
+                    on_event(generation, PlayerEvent::Failed(err.to_string()));
+                }
                 return;
             }
         };
+        let mut idle = std::time::Duration::ZERO;
         loop {
             if cancelled.load(Ordering::Relaxed) {
                 return;
             }
-            match stream.next().await {
+            // Reading a body chunk is cancel safe: a dropped read loses
+            // no data.
+            let next = match tokio::time::timeout(CANCEL_POLL, stream.next()).await {
+                Ok(next) => {
+                    idle = std::time::Duration::ZERO;
+                    next
+                }
+                Err(_) => {
+                    idle += CANCEL_POLL;
+                    if idle >= BODY_IDLE_TIMEOUT {
+                        on_event(
+                            generation,
+                            PlayerEvent::Failed("the stream stopped sending data".to_string()),
+                        );
+                        return;
+                    }
+                    continue;
+                }
+            };
+            match next {
                 Ok(Some(chunks)) => {
                     for chunk in chunks {
                         match chunk {
-                            // Blocks while the decoder is behind: this
-                            // runtime runs nothing else.
                             IcyChunk::Audio(audio) => {
-                                if bytes.send(audio).is_err() {
+                                if !send_audio(&bytes, audio, &cancelled) {
                                     return;
                                 }
                             }
@@ -346,7 +403,7 @@ fn decoder_thread(
     cancelled: Arc<AtomicBool>,
     on_event: EventSink,
 ) {
-    let reader = StreamReader::new(bytes);
+    let reader = StreamReader::new(bytes, Arc::clone(&cancelled));
     let decoder = match rodio::decoder::DecoderBuilder::new()
         .with_data(reader)
         .with_hint(hint)
@@ -389,11 +446,13 @@ struct StreamReader {
     current: Vec<u8>,
     offset: usize,
     position: u64,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl StreamReader {
-    fn new(chunks: Receiver<Vec<u8>>) -> Self {
+    fn new(chunks: Receiver<Vec<u8>>, cancelled: Arc<AtomicBool>) -> Self {
         Self {
+            cancelled,
             chunks: Mutex::new(chunks),
             current: Vec::new(),
             offset: 0,
@@ -405,8 +464,11 @@ impl StreamReader {
 impl Read for StreamReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         while self.offset >= self.current.len() {
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Ok(0);
+            }
             let next = match self.chunks.lock() {
-                Ok(chunks) => chunks.recv(),
+                Ok(chunks) => chunks.recv_timeout(CANCEL_POLL),
                 Err(_) => return Ok(0),
             };
             match next {
@@ -414,8 +476,10 @@ impl Read for StreamReader {
                     self.current = chunk;
                     self.offset = 0;
                 }
+                // Nothing yet: look at the cancel flag again.
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 // The network side is gone: end of stream.
-                Err(_) => return Ok(0),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             }
         }
         let count = buf.len().min(self.current.len() - self.offset);
@@ -542,12 +606,148 @@ mod tests {
         tx.send(b"Og".to_vec()).unwrap();
         tx.send(b"gS".to_vec()).unwrap();
         drop(tx);
-        let mut reader = StreamReader::new(rx);
+        let mut reader = StreamReader::new(rx, Arc::new(AtomicBool::new(false)));
         let mut all = Vec::new();
         reader.read_to_end(&mut all).unwrap();
         assert_eq!(all, b"OggS");
         assert_eq!(reader.stream_position().unwrap(), 4);
         assert!(reader.seek(SeekFrom::Start(0)).is_err());
+    }
+
+    #[test]
+    fn stream_reader_stops_on_cancel_while_the_sender_lives() {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut reader = StreamReader::new(rx, Arc::clone(&cancelled));
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut buf = [0u8; 8];
+            let count = reader.read(&mut buf).unwrap();
+            let _ = done_tx.send(count);
+        });
+        thread::sleep(std::time::Duration::from_millis(250));
+        cancelled.store(true, Ordering::Relaxed);
+        let count = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the reader must stop after the cancel");
+        assert_eq!(count, 0);
+        worker.join().unwrap();
+        drop(tx);
+    }
+
+    /// Reads the request head, so the client sees a started response.
+    fn read_request(socket: &mut std::net::TcpStream) {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if socket.read(&mut byte).unwrap_or(0) == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+    }
+
+    fn network_events() -> (EventSink, Arc<Mutex<Vec<PlayerEvent>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (
+            Arc::new(move |_, event| sink.lock().unwrap().push(event)),
+            seen,
+        )
+    }
+
+    #[test]
+    fn a_stalled_body_read_stops_on_cancel_and_closes_the_connection() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_request(&mut socket);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 1000000\r\n\r\n",
+                )
+                .unwrap();
+            socket.flush().unwrap();
+            // The body never comes: wait until the client closes.
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let closed = matches!(socket.read(&mut byte), Ok(0) | Err(_));
+            let _ = closed_tx.send(closed);
+        });
+        let (bytes_tx, bytes_rx) = mpsc::sync_channel::<Vec<u8>>(BYTE_CHUNKS);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (events, _seen) = network_events();
+        let network_cancelled = Arc::clone(&cancelled);
+        let network = thread::spawn(move || {
+            network_thread(
+                format!("http://127.0.0.1:{port}/live"),
+                true,
+                1,
+                bytes_tx,
+                network_cancelled,
+                events,
+            );
+        });
+        let mut reader = StreamReader::new(bytes_rx, Arc::clone(&cancelled));
+        let decoder = thread::spawn(move || {
+            let mut buf = [0u8; 8];
+            reader.read(&mut buf).unwrap()
+        });
+        thread::sleep(std::time::Duration::from_millis(500));
+        assert!(!network.is_finished());
+        assert!(!decoder.is_finished());
+        cancelled.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !(network.is_finished() && decoder.is_finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the workers must exit after the cancel"
+            );
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        network.join().unwrap();
+        assert_eq!(decoder.join().unwrap(), 0);
+        assert!(closed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the server must see the connection close"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_stream_with_data_ends_normally() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_request(&mut socket);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd",
+                )
+                .unwrap();
+        });
+        let (bytes_tx, bytes_rx) = mpsc::sync_channel::<Vec<u8>>(BYTE_CHUNKS);
+        let (events, seen) = network_events();
+        network_thread(
+            format!("http://127.0.0.1:{port}/live"),
+            true,
+            7,
+            bytes_tx,
+            Arc::new(AtomicBool::new(false)),
+            events,
+        );
+        server.join().unwrap();
+        let mut reader = StreamReader::new(bytes_rx, Arc::new(AtomicBool::new(false)));
+        let mut all = Vec::new();
+        reader.read_to_end(&mut all).unwrap();
+        assert_eq!(all, b"abcd");
+        assert_eq!(*seen.lock().unwrap(), vec![PlayerEvent::Ended]);
     }
 
     #[test]
