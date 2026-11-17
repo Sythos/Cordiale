@@ -883,7 +883,7 @@ mod tests {
         offsets.extend((0..chunks).map(|chunk| 100 + chunk * 10));
         let mut stbl = Vec::new();
         for part in [
-            full(b"stsz", &[0, 10, samples]),
+            full(b"stsz", &[10, samples]),
             full(b"stsc", runs),
             full(b"stco", &offsets),
             full(b"stts", &[1, samples, 1000]),
@@ -895,13 +895,21 @@ mod tests {
 
     #[test]
     fn alternating_runs_over_many_chunks_are_refused() {
-        // The run order fails at the third run, before any chunk scan.
+        // The run order fails at the second run, before any chunk scan.
         let mut runs = vec![400];
         for run in 0..400u32 {
             runs.extend_from_slice(&[if run % 2 == 0 { 400 } else { 1 }, 1, 1]);
         }
         let stbl = table_with_many_chunks(2, 400, &runs);
         assert!(sample_list(&boxes(&stbl), 1000).is_err());
+        // The same table with increasing runs is valid, so only the run order
+        // causes the error above.
+        let mut runs = vec![400];
+        for run in 1..=400u32 {
+            runs.extend_from_slice(&[run, 1, 1]);
+        }
+        let stbl = table_with_many_chunks(2, 400, &runs);
+        assert!(sample_list(&boxes(&stbl), 1000).is_ok());
     }
 
     #[test]
