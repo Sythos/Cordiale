@@ -58,6 +58,7 @@ mod passkeys;
 mod player;
 mod queries;
 mod raster_image;
+mod read_cursor_sync;
 mod reply;
 mod reply_presence;
 mod slash;
@@ -1605,6 +1606,9 @@ struct WindowState {
     /// window key. The network is preserved and only the channel segment is
     /// ASCII-folded, matching Cicchetto's channel key.
     read_cursors: HashMap<(String, String), i64>,
+    /// Cursor updates that the server has not confirmed. A failed POST stays
+    /// here and a later flush sends it again. Shared with the send tasks.
+    read_cursor_sync: Arc<Mutex<read_cursor_sync::ReadCursorSync>>,
     /// The read cursor of the open channel as it was when the channel
     /// opened, before the window read it. The unread divider reads it; no
     /// other rule does.
@@ -1884,6 +1888,7 @@ impl WorkerState {
                 window_mentions: HashMap::new(),
                 window_messages: HashMap::new(),
                 read_cursors: HashMap::new(),
+                read_cursor_sync: Arc::default(),
                 unread_baseline: None,
                 unread_hold: std::cell::Cell::new(false),
                 badge_count: 0,
@@ -3014,6 +3019,9 @@ async fn run_worker(
                             ui.set_status_retry_secs(0);
                         });
                         request_watch_patterns(&mut state);
+                        // Send again the read cursors that the server did not
+                        // confirm before the socket dropped.
+                        flush_read_cursor_sync(&mut state);
                         // Open the E2E engines and read what the inbox held
                         // while the socket was down.
                         start_e2e_engines(&mut state, &ui).await;
@@ -3401,6 +3409,9 @@ async fn finish_connect(
             // and account-wide badge; replace prior identity state before
             // opening the new Phoenix session.
             state.windows.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
+            if let Ok(mut sync) = state.windows.read_cursor_sync.lock() {
+                sync.clear();
+            }
             state.windows.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
             state.transcript.members.clear();
             state.transcript.presence_log.clear();
@@ -8301,45 +8312,92 @@ fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)
     Some((network, target, newest))
 }
 
-/// Advances the visible window's server cursor. Fire-and-forget: a failure
-/// only leaves the unread count as the server has it.
+/// Advances the visible window's server cursor. The update stays pending
+/// until the server confirms it: a failed or ambiguous POST is sent again by
+/// a task that waits a bounded time between sends. Every call also restarts
+/// idle pending updates, for example after a reconnect.
 fn write_back_read_cursor(state: &mut WorkerState) {
-    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+    if state.conn.client.is_none() || state.conn.token.is_none() {
         return;
-    };
-    let Some((network, target, message_id)) = read_cursor_to_write(state) else {
-        return;
-    };
-    // The peer's windows under newer nicks are read with the open DM: their
-    // cursors move too, so no unread count is left behind on the server.
-    let mut targets = vec![target.clone()];
-    if state.windows.current_query {
-        if let Some(anchor) = find_query_window(&state.transcript.query_windows, &network, &target)
-        {
-            for followed in followed_query_windows(state, anchor) {
-                let key = window_state_key(&network, &followed.target_nick);
-                if state
-                    .windows
-                    .read_cursors
-                    .get(&key)
-                    .is_none_or(|&cursor| cursor < message_id)
-                {
-                    state.windows.read_cursors.insert(key, message_id);
-                    targets.push(followed.target_nick);
+    }
+    if let Some((network, target, message_id)) = read_cursor_to_write(state) {
+        // The peer's windows under newer nicks are read with the open DM:
+        // their cursors move too, so no unread count is left behind on the
+        // server.
+        let mut targets = vec![target.clone()];
+        if state.windows.current_query {
+            if let Some(anchor) =
+                find_query_window(&state.transcript.query_windows, &network, &target)
+            {
+                for followed in followed_query_windows(state, anchor) {
+                    let key = window_state_key(&network, &followed.target_nick);
+                    if state
+                        .windows
+                        .read_cursors
+                        .get(&key)
+                        .is_none_or(|&cursor| cursor < message_id)
+                    {
+                        state.windows.read_cursors.insert(key, message_id);
+                        targets.push(followed.target_nick);
+                    }
                 }
             }
         }
-    }
-    tokio::spawn(async move {
-        for target in targets {
-            if let Err(err) = client
-                .set_read_cursor(&token, &network, &target, message_id)
-                .await
-            {
-                persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+        if let Ok(mut sync) = state.windows.read_cursor_sync.lock() {
+            for target in &targets {
+                sync.queue(window_state_key(&network, target), target, message_id);
             }
         }
-    });
+    }
+    flush_read_cursor_sync(state);
+}
+
+/// Starts one send task for each window that has a pending cursor update and
+/// no running task. It does not move any cursor, so a reconnect can call it.
+fn flush_read_cursor_sync(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let idle = match state.windows.read_cursor_sync.lock() {
+        Ok(mut sync) => sync.take_idle(),
+        Err(_) => return,
+    };
+    for (key, ticket) in idle {
+        let sync = Arc::clone(&state.windows.read_cursor_sync);
+        let client = client.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            let mut failures = 0u32;
+            while let Some(send) = sync
+                .lock()
+                .ok()
+                .and_then(|mut sync| sync.next_send(&key, ticket))
+            {
+                match client
+                    .set_read_cursor(&token, &send.network, &send.target, send.message_id)
+                    .await
+                {
+                    Ok(stored) => {
+                        failures = 0;
+                        if let Ok(mut sync) = sync.lock() {
+                            sync.sent_ok(&key, send.message_id, stored);
+                        }
+                    }
+                    Err(err) => {
+                        persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+                        failures += 1;
+                        if failures >= read_cursor_sync::MAX_SEND_ATTEMPTS {
+                            if let Ok(mut sync) = sync.lock() {
+                                sync.release(&key, ticket);
+                            }
+                            break;
+                        }
+                        tokio::time::sleep(read_cursor_sync::retry_delay(failures)).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Makes a newly selected window start at its newest row, while preserving

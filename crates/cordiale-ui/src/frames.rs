@@ -1598,10 +1598,25 @@ pub(crate) fn apply_read_cursor_set(
         return false;
     };
 
-    let cursor_changed =
-        state.windows.read_cursors.get(&key).copied() != Some(last_read_message_id);
+    // The push confirms a pending update of the same network and window.
+    // A newer unconfirmed local cursor stays: the push never moves it back.
+    let still_pending = state
+        .windows
+        .read_cursor_sync
+        .lock()
+        .map(|mut sync| {
+            sync.confirm(&key, last_read_message_id);
+            sync.pending_id(&key)
+        })
+        .ok()
+        .flatten()
+        .is_some();
+    let cursor_changed = !still_pending
+        && state.windows.read_cursors.get(&key).copied() != Some(last_read_message_id);
     let badge_changed = state.windows.badge_count != badge_count;
-    state.windows.read_cursors.insert(key, last_read_message_id);
+    if !still_pending {
+        state.windows.read_cursors.insert(key, last_read_message_id);
+    }
     state.windows.badge_count = badge_count;
     cursor_changed || badge_changed
 }
@@ -3502,6 +3517,18 @@ pub(crate) fn apply_network_rest_refresh(
     }
     state.transcript.messages = messages;
     state.windows.read_cursors = read_cursors_from_me(&me.read_cursors);
+    // A reconnect keeps the updates that the server snapshot does not cover:
+    // the local cursor stays at them and the send restarts.
+    let unconfirmed = state
+        .windows
+        .read_cursor_sync
+        .lock()
+        .map(|mut sync| sync.reconcile(&state.windows.read_cursors))
+        .unwrap_or_default();
+    for (key, message_id) in unconfirmed {
+        state.windows.read_cursors.insert(key, message_id);
+    }
+    write_back_read_cursor(state);
     state.windows.badge_count = normalize_badge_count(Some(&me.badge_count));
     state.home.apply_me(me);
     state
