@@ -7335,6 +7335,7 @@ fn parse_away_delay(text: &str) -> Result<Option<i64>, ()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_personal_prefs_save(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
