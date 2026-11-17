@@ -5306,6 +5306,49 @@ fn members_average_probe_counts_the_bracketed_prefix() {
     assert_eq!(members_average_probe(&rows), "nnnnnnn");
 }
 
+/// Applies the responses in the given order and returns the account whose
+/// values are on screen, as the UI closures do with the session check.
+fn shown_account(responses: &[(u64, &'static str)], current: u64) -> Option<&'static str> {
+    let mut shown = None;
+    for (session, account) in responses {
+        if prefs_session_is_current(*session, current) {
+            shown = Some(*account);
+        }
+    }
+    shown
+}
+
+#[test]
+fn slow_response_of_account_a_is_ignored_after_login_of_b() {
+    // Login A is session 1, logout is 2, login B is 3. B answers first.
+    let responses = [(3, "B"), (1, "A")];
+    assert_eq!(shown_account(&responses, 3), Some("B"));
+}
+
+#[test]
+fn fast_response_of_account_a_is_ignored_after_login_of_b() {
+    // A answers, the user logs out and logs in as B, B has not answered yet.
+    let responses = [(1, "A")];
+    assert_eq!(shown_account(&responses, 3), None);
+    let responses = [(1, "A"), (3, "B")];
+    assert_eq!(shown_account(&responses, 3), Some("B"));
+}
+
+#[test]
+fn response_after_logout_is_ignored() {
+    assert!(!prefs_session_is_current(1, 2));
+    assert!(prefs_session_is_current(2, 2));
+}
+
+#[test]
+fn prefs_session_counter_makes_old_sessions_stale() {
+    let first = begin_prefs_session();
+    assert!(prefs_session_matches(first));
+    let second = begin_prefs_session();
+    assert!(!prefs_session_matches(first));
+    assert!(prefs_session_matches(second));
+}
+
 #[test]
 fn away_delay_text_round_trips() {
     assert_eq!(away_delay_text(None), "");
