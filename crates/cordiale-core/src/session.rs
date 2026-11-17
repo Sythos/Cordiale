@@ -419,6 +419,9 @@ struct RejoinBook {
     pending: HashMap<String, (Instant, bool)>,
     /// Topic to (failed attempts in a row, time of the last schedule).
     history: HashMap<String, (u32, Instant)>,
+    /// Topic to (`join_ref` of the rejoin sent, presence flag), until the
+    /// server answers it.
+    awaiting: HashMap<String, (String, bool)>,
 }
 
 impl RejoinBook {
@@ -433,6 +436,7 @@ impl RejoinBook {
             _ => 0,
         };
         let delay = rejoin_delay(attempts);
+        self.awaiting.remove(topic);
         self.history
             .insert(topic.to_string(), (attempts.saturating_add(1), now));
         self.pending
@@ -461,13 +465,34 @@ impl RejoinBook {
             .collect()
     }
 
+    /// A rejoin frame went out with `join_ref`: its reply is still to come.
+    fn sent(&mut self, topic: &str, join_ref: &str, presence: bool) {
+        self.awaiting
+            .insert(topic.to_string(), (join_ref.to_string(), presence));
+    }
+
+    /// Takes the open rejoin of `topic` when `message_ref` is the ref of its
+    /// join frame. Returns the presence flag of that join. A reply with any
+    /// other ref is not the answer to the rejoin and returns `None`.
+    fn take_reply(&mut self, topic: &str, message_ref: &str) -> Option<bool> {
+        match self.awaiting.get(topic) {
+            Some((join_ref, _)) if join_ref == message_ref => {
+                self.awaiting.remove(topic).map(|(_, presence)| presence)
+            }
+            _ => None,
+        }
+    }
+
     /// The topic is left on purpose or joined again by the caller.
     fn cancel(&mut self, topic: &str) {
         self.pending.remove(topic);
+        self.awaiting.remove(topic);
     }
 
     /// Removes every waiting topic, for a new connection that joins them all.
     fn drain(&mut self) -> Vec<(String, bool)> {
+        // The refs of the next connection start again: an old one could match.
+        self.awaiting.clear();
         self.pending
             .drain()
             .map(|(topic, (_, presence))| (topic, presence))
@@ -689,6 +714,10 @@ async fn run_session(
                             Ok(join_ref) => {
                                 if topic == user_topic {
                                     user_join_ref = join_ref.clone();
+                                } else {
+                                    // The reply is read in the frame branch: a
+                                    // refusal schedules the next attempt.
+                                    rejoins.sent(&topic, &join_ref, topic_presence);
                                 }
                                 joined_topics.insert(
                                     topic,
@@ -776,6 +805,33 @@ async fn run_session(
                 frame = socket.next_message() => {
                     match frame {
                         Ok(Some(message)) => {
+                            // The answer to an automatic rejoin of a topic
+                            // other than the user topic.
+                            if message.topic != user_topic && message.event == "phx_reply" {
+                                if let Some(topic_presence) = message
+                                    .message_ref
+                                    .as_deref()
+                                    .and_then(|message_ref| {
+                                        rejoins.take_reply(&message.topic, message_ref)
+                                    })
+                                {
+                                    let join_ref = message.message_ref.clone().unwrap_or_default();
+                                    if let Some(Err(reason)) =
+                                        user_join_outcome(&message, &message.topic, &join_ref)
+                                    {
+                                        joined_topics.remove(&message.topic);
+                                        // A refusal that no retry can fix ends
+                                        // the attempts for this topic.
+                                        if !is_permanent_join_refusal(&reason) {
+                                            rejoins.schedule(
+                                                &message.topic,
+                                                topic_presence,
+                                                Instant::now(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             match topic_end(&message, &joined_topics) {
                                 // The channel process of one topic crashed
                                 // while the socket stays open: mark the topic
@@ -1312,10 +1368,14 @@ mod tests {
     /// A mock Grappa socket for one connection. It acknowledges every
     /// `phx_join`, reports each join as `(topic, join_ref)` on the returned
     /// channel, and sends `end_event` on the network topic after its first
-    /// join. After the second join of that topic it pushes a `marker` event
-    /// on it. The user topic gets a `marker` push after the first end frame.
+    /// join. After a later accepted join of that topic it pushes a `marker`
+    /// event on it. The user topic gets a `marker` push after the first end
+    /// frame. `net_statuses` sets the reply status of each join of the
+    /// network topic in turn; a join past the list gets `ok`, and a join
+    /// that is not `ok` pushes nothing.
     async fn mock_session_server(
         end_event: &'static str,
+        net_statuses: &'static [&'static str],
     ) -> (
         String,
         mpsc::UnboundedReceiver<(String, String)>,
@@ -1356,24 +1416,29 @@ mod tests {
                 }
                 let join_ref = frame.join_ref.clone().unwrap_or_default();
                 let _ = joins_tx.send((frame.topic.clone(), join_ref.clone()));
+                let mut status = "ok";
+                if frame.topic == "net" {
+                    net_joins += 1;
+                    status = net_statuses.get(net_joins - 1).copied().unwrap_or("ok");
+                }
+                let payload = if status == "ok" {
+                    serde_json::json!({"status": "ok", "response": {}})
+                } else {
+                    serde_json::json!({"status": status, "response": {"reason": "join crashed"}})
+                };
                 let mut outgoing = vec![PhoenixMessage {
                     join_ref: frame.join_ref.clone(),
                     message_ref: frame.message_ref.clone(),
                     topic: frame.topic.clone(),
                     event: "phx_reply".to_string(),
-                    payload: serde_json::json!({"status": "ok", "response": {}}),
+                    payload,
                 }];
-                if frame.topic == "net" {
-                    net_joins += 1;
-                    let (event, topic) = if net_joins == 1 {
-                        (end_event, "net")
-                    } else {
-                        ("marker", "net")
-                    };
+                if frame.topic == "net" && status == "ok" {
+                    let event = if net_joins == 1 { end_event } else { "marker" };
                     outgoing.push(PhoenixMessage {
                         join_ref: frame.join_ref.clone(),
                         message_ref: None,
-                        topic: topic.to_string(),
+                        topic: "net".to_string(),
                         event: event.to_string(),
                         payload: serde_json::json!({}),
                     });
@@ -1406,7 +1471,7 @@ mod tests {
 
     #[tokio::test]
     async fn phx_error_on_one_topic_joins_it_again_on_the_same_socket() {
-        let (url, mut joins, server) = mock_session_server("phx_error").await;
+        let (url, mut joins, server) = mock_session_server("phx_error", &[]).await;
         let (handle, mut events) = spawn_session(url, "token".to_string(), "bob".to_string());
         handle.join_topic("net", true);
 
@@ -1443,8 +1508,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_rejoin_is_tried_again_with_a_new_ref() {
+        // Join 1 works and then fails with phx_error, join 2 is refused,
+        // join 3 works.
+        let (url, mut joins, server) =
+            mock_session_server("phx_error", &["ok", "error", "ok"]).await;
+        let (handle, mut events) = spawn_session(url, "token".to_string(), "bob".to_string());
+        handle.join_topic("net", true);
+
+        loop {
+            match next_event(&mut events).await {
+                SessionEvent::Connected { .. } => {}
+                SessionEvent::Frame(frame) if frame.event == "marker" && frame.topic == "net" => {
+                    break
+                }
+                SessionEvent::Frame(_) => {}
+                other => panic!("the socket must stay open: {other:?}"),
+            }
+        }
+
+        let mut net_refs = Vec::new();
+        let mut user_joins = 0;
+        while let Ok((topic, join_ref)) = joins.try_recv() {
+            if topic == "net" {
+                net_refs.push(join_ref);
+            } else {
+                user_joins += 1;
+            }
+        }
+        assert_eq!(user_joins, 1);
+        assert_eq!(net_refs.len(), 3);
+        assert_ne!(net_refs[0], net_refs[1]);
+        assert_ne!(net_refs[1], net_refs[2]);
+
+        handle.shutdown();
+        server.abort();
+    }
+
+    #[test]
+    fn rejoin_book_matches_a_reply_only_by_the_ref_of_the_sent_join() {
+        let mut book = RejoinBook::default();
+        book.sent("t", "7", true);
+        assert_eq!(book.take_reply("t", "8"), None);
+        assert_eq!(book.take_reply("u", "7"), None);
+        assert_eq!(book.take_reply("t", "7"), Some(true));
+        // The reply is taken once.
+        assert_eq!(book.take_reply("t", "7"), None);
+
+        book.sent("t", "9", false);
+        book.cancel("t");
+        assert_eq!(book.take_reply("t", "9"), None);
+
+        book.sent("t", "10", false);
+        assert!(book.drain().is_empty());
+        assert_eq!(book.take_reply("t", "10"), None);
+    }
+
+    #[tokio::test]
     async fn phx_close_on_one_topic_does_not_join_it_again() {
-        let (url, mut joins, server) = mock_session_server("phx_close").await;
+        let (url, mut joins, server) = mock_session_server("phx_close", &[]).await;
         let (handle, mut events) = spawn_session(url, "token".to_string(), "bob".to_string());
         handle.join_topic("net", true);
 
