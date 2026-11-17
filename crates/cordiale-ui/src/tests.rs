@@ -8760,6 +8760,23 @@ fn whois_avatar_epoch_drops_a_late_result_of_an_older_view() {
 }
 
 #[test]
+fn whois_avatar_applies_only_to_the_open_current_whois_view() {
+    let epoch = WhoisAvatarEpoch::new();
+    // Alice's view starts a slow download; Bob's view starts a fast one.
+    let alice = epoch.begin_view();
+    let bob = epoch.begin_view();
+    // Out of order: Bob's result lands first, then Alice's late result.
+    assert!(whois_avatar_applies(&epoch, bob, true, "whois_bundle"));
+    assert!(!whois_avatar_applies(&epoch, alice, true, "whois_bundle"));
+    // A closed card or another kind of view never takes an avatar.
+    assert!(!whois_avatar_applies(&epoch, bob, false, "whois_bundle"));
+    assert!(!whois_avatar_applies(&epoch, bob, true, "mentions_bundle"));
+    // Replacing the view makes the earlier download stale.
+    epoch.begin_view();
+    assert!(!whois_avatar_applies(&epoch, bob, true, "whois_bundle"));
+}
+
+#[test]
 fn whois_avatar_epoch_keeps_the_current_result() {
     let epoch = WhoisAvatarEpoch::new();
     epoch.begin_view();

@@ -5560,6 +5560,18 @@ impl WhoisAvatarEpoch {
 /// The epoch of the reply view that may show a WHOIS avatar.
 pub(crate) static WHOIS_AVATAR_EPOCH: WhoisAvatarEpoch = WhoisAvatarEpoch::new();
 
+/// True when a download that started in view `epoch` may show its image:
+/// the WHOIS card is still open, it is still the same view, and the view
+/// holds a WHOIS card.
+pub(crate) fn whois_avatar_applies(
+    current: &WhoisAvatarEpoch,
+    epoch: u64,
+    card_open: bool,
+    reply_kind: &str,
+) -> bool {
+    card_open && reply_kind == "whois_bundle" && current.is_current(epoch)
+}
+
 /// Downloads the WHOIS avatar from Grappa and shows it on the reply
 /// screen. Slint loads images from files, so it's written to the temp
 /// directory first; a failure just leaves the card without a picture.
@@ -5599,7 +5611,12 @@ fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_ur
             };
         let _ = ui.upgrade_in_event_loop(move |ui| {
             let card_open = ui.get_whois_popup_open() || ui.get_screen() == "reply";
-            if card_open && WHOIS_AVATAR_EPOCH.is_current(epoch) {
+            if whois_avatar_applies(
+                &WHOIS_AVATAR_EPOCH,
+                epoch,
+                card_open,
+                ui.get_reply_kind().as_str(),
+            ) {
                 if let Ok(image) = slint::Image::load_from_path(&path) {
                     ui.set_reply_avatar(image);
                     ui.set_reply_avatar_visible(true);
