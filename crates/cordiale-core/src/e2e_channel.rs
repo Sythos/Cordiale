@@ -46,7 +46,7 @@
 //! sealed E2E state file (`e2e_state.rs`) and is separate from the Olm
 //! sessions of the private queries.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use vodozemac::megolm::{
@@ -57,7 +57,9 @@ use zeroize::Zeroize;
 
 /// Version of the channel payload.
 pub const PAYLOAD_VERSION: u8 = 3;
-/// Message indices that a device remembers for each inbound session.
+/// Message indices that a device remembers for each inbound session. An
+/// index older than the window is refused, so a late message is accepted
+/// only while fewer than this number of newer indices wait in the window.
 pub const SEEN_WINDOW: usize = 1024;
 /// Inbound sessions kept for each sending device: the current one and the
 /// one before it, so a message in flight at a rotation still opens.
@@ -144,8 +146,32 @@ struct Inbound {
     pickle: String,
     /// Order of arrival, to drop the oldest session of a device.
     order: u64,
-    /// Message indices accepted.
-    seen: VecDeque<u32>,
+    /// Message indices accepted at or above `floor`. At most
+    /// `SEEN_WINDOW` entries.
+    #[serde(default)]
+    seen: BTreeSet<u32>,
+    /// Every index below this value is refused. It moves up when the
+    /// window is full: an old index never opens again.
+    #[serde(default)]
+    floor: u32,
+}
+
+impl Inbound {
+    /// True when the index was accepted or is older than the window.
+    fn is_replay(&self, index: u32) -> bool {
+        index < self.floor || self.seen.contains(&index)
+    }
+
+    /// Stores an accepted index. When the window is full, the lowest
+    /// index leaves it and the floor moves above that index.
+    fn record(&mut self, index: u32) {
+        self.seen.insert(index);
+        while self.seen.len() > SEEN_WINDOW {
+            if let Some(lowest) = self.seen.pop_first() {
+                self.floor = self.floor.max(lowest.saturating_add(1));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,7 +573,8 @@ impl ChannelKeyring {
             Inbound {
                 pickle,
                 order: state.counter,
-                seen: VecDeque::new(),
+                seen: BTreeSet::new(),
+                floor: 0,
             },
         );
         while sessions.len() > SESSIONS_PER_DEVICE {
@@ -641,7 +668,7 @@ impl ChannelKeyring {
         if message.message_index() != payload.i {
             return Err(ChannelError::BadCiphertext);
         }
-        if entry.seen.contains(&payload.i) {
+        if entry.is_replay(payload.i) {
             return Err(ChannelError::Replay);
         }
         let pickle: InboundGroupSessionPickle =
@@ -651,10 +678,7 @@ impl ChannelKeyring {
             .decrypt(&message)
             .map_err(|_| ChannelError::BadCiphertext)?;
         let text = String::from_utf8(opened.plaintext).map_err(|_| ChannelError::BadCiphertext)?;
-        entry.seen.push_back(opened.message_index);
-        while entry.seen.len() > SEEN_WINDOW {
-            entry.seen.pop_front();
-        }
+        entry.record(opened.message_index);
         Ok(Opened {
             sender_did: sender_did.to_string(),
             session_id: payload.sid,
@@ -1022,6 +1046,95 @@ mod tests {
         let opened = restored_b.decrypt(NET, CH, "a", &next).unwrap();
         assert_eq!(opened.text, "next");
         assert_eq!(opened.index, 1);
+    }
+
+    #[test]
+    fn an_old_index_stays_refused_after_it_leaves_the_window() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a, &mut b], 1, &["a", "b"]);
+        share(&mut a, &mut [&mut b]);
+        let wires: Vec<String> = (0..=SEEN_WINDOW)
+            .map(|n| send(&mut a, &n.to_string()))
+            .collect();
+        // The first SEEN_WINDOW messages fill the window exactly.
+        for wire in &wires[..SEEN_WINDOW] {
+            b.ring.decrypt(NET, CH, "a", wire).unwrap();
+        }
+        assert_eq!(
+            b.ring.decrypt(NET, CH, "a", &wires[0]),
+            Err(ChannelError::Replay)
+        );
+        // One more message pushes index 0 out of the window.
+        b.ring.decrypt(NET, CH, "a", &wires[SEEN_WINDOW]).unwrap();
+        let entry = &b.ring.channels.get(&channel_id(NET, CH)).unwrap().inbound["a"];
+        let entry = entry.values().next().unwrap();
+        assert_eq!(entry.seen.len(), SEEN_WINDOW);
+        assert_eq!(entry.floor, 1);
+        // The same payload comes back again, as with a new inbox row id.
+        assert_eq!(
+            b.ring.decrypt(NET, CH, "a", &wires[0]),
+            Err(ChannelError::Replay)
+        );
+        assert_eq!(
+            b.ring.decrypt(NET, CH, "a", &wires[1]),
+            Err(ChannelError::Replay)
+        );
+        // The protection survives a save and a restore.
+        let mut restored: ChannelKeyring =
+            serde_json::from_str(&serde_json::to_string(&b.ring).unwrap()).unwrap();
+        assert_eq!(
+            restored.decrypt(NET, CH, "a", &wires[0]),
+            Err(ChannelError::Replay)
+        );
+        // A new message still opens.
+        let next = send(&mut a, "next");
+        assert_eq!(restored.decrypt(NET, CH, "a", &next).unwrap().text, "next");
+    }
+
+    #[test]
+    fn out_of_order_messages_inside_the_window_open_once() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a, &mut b], 1, &["a", "b"]);
+        share(&mut a, &mut [&mut b]);
+        let wires: Vec<String> = (0..3).map(|n| send(&mut a, &n.to_string())).collect();
+        for n in [2usize, 0, 1] {
+            let opened = b.ring.decrypt(NET, CH, "a", &wires[n]).unwrap();
+            assert_eq!(opened.text, n.to_string());
+        }
+        for wire in &wires {
+            assert_eq!(
+                b.ring.decrypt(NET, CH, "a", wire),
+                Err(ChannelError::Replay)
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_saved_before_the_floor_existed_still_loads() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a, &mut b], 1, &["a", "b"]);
+        share(&mut a, &mut [&mut b]);
+        let wire = send(&mut a, "old");
+        b.ring.decrypt(NET, CH, "a", &wire).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&b.ring).unwrap()).unwrap();
+        // The old format had a list of indices and no floor.
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("floor");
+                    map.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut value);
+        let mut restored: ChannelKeyring = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.decrypt(NET, CH, "a", &wire),
+            Err(ChannelError::Replay)
+        );
     }
 
     #[test]
