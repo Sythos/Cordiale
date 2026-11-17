@@ -1804,6 +1804,16 @@ mod tests {
         (url, connections_rx, server)
     }
 
+    /// The next session event that is not a frame.
+    async fn next_non_frame(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> SessionEvent {
+        loop {
+            match next_event(events).await {
+                SessionEvent::Frame(_) => {}
+                other => return other,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_missing_heartbeat_reply_reconnects_once_and_recovers() {
         let (url, mut connections, server) = mock_silent_then_answering_server().await;
@@ -1819,7 +1829,7 @@ mod tests {
             next_event(&mut events).await,
             SessionEvent::Connected { .. }
         ));
-        match next_event(&mut events).await {
+        match next_non_frame(&mut events).await {
             SessionEvent::Disconnected { reason, .. } => {
                 assert_eq!(reason, "heartbeat reply missing")
             }
@@ -1827,14 +1837,15 @@ mod tests {
         }
         // The existing reconnect path restores the session.
         assert!(matches!(
-            next_event(&mut events).await,
+            next_non_frame(&mut events).await,
             SessionEvent::Connected { .. }
         ));
         // The second connection answers: it stays up for several intervals.
+        // Frames (the join reply and the heartbeat replies) are expected.
         let end = tokio::time::Instant::now() + Duration::from_millis(1200);
         while let Ok(event) = tokio::time::timeout_at(end, next_event(&mut events)).await {
             match event {
-                SessionEvent::Frame(frame) if frame.topic == HEARTBEAT_TOPIC => {}
+                SessionEvent::Frame(_) => {}
                 other => panic!("the answered session must stay up: {other:?}"),
             }
         }
