@@ -544,10 +544,13 @@ mod tests {
     #[test]
     fn a_result_of_the_active_session_is_kept_with_its_temporary_file() {
         let session = CancelFlag::default();
-        let path = temp_files::write_private("e2e-media-test", ".png", b"plain").unwrap();
+        // Own directory: the shared private directory can be removed by
+        // another test that runs at the same time.
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("e2e-media.png");
+        std::fs::write(&path, b"plain").unwrap();
         assert!(!drop_if_stale(&session, Some(&path)));
         assert!(path.exists());
-        temp_files::discard(&path);
     }
 
     #[test]
@@ -555,7 +558,9 @@ mod tests {
         // A disconnect cancels the flag of the session.
         let session = CancelFlag::default();
         session.cancel();
-        let path = temp_files::write_private("e2e-media-test", ".png", b"plain").unwrap();
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("e2e-media.png");
+        std::fs::write(&path, b"plain").unwrap();
         assert!(drop_if_stale(&session, Some(&path)));
         assert!(!path.exists());
     }
