@@ -1477,6 +1477,8 @@ struct TranscriptState {
     /// they held when the socket dropped (live rows arriving after the
     /// rejoin must not move the anchor). Drained one channel at a time.
     catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
+    /// Failed tries so far of a channel's catch-up (temporary REST errors).
+    catch_up_attempts: std::collections::BTreeMap<(String, String), u32>,
     /// Keyed by `(network, channel)`; holds messages already rendered for
     /// that channel so switching channels doesn't lose history.
     messages: MessagesByChannel,
@@ -1797,6 +1799,7 @@ impl WorkerState {
             },
             transcript: TranscriptState {
                 catch_up_anchors: std::collections::BTreeMap::new(),
+                catch_up_attempts: std::collections::BTreeMap::new(),
                 messages: HashMap::new(),
                 drafts: HashMap::new(),
                 topics: HashMap::new(),
@@ -3409,6 +3412,7 @@ async fn finish_connect(
             state.networks.supported_user_modes_by_network.clear();
             state.conn.own_listener_ready.clear();
             state.transcript.catch_up_anchors.clear();
+            state.transcript.catch_up_attempts.clear();
             state.prefs.notification_prefs = None;
             state.windows.current_query = false;
             state.windows.current_query_ready = false;
@@ -8888,6 +8892,13 @@ const CATCH_UP_PROBE_CAP: u64 = CATCH_UP_PAGE as u64 + 1;
 /// Pause between two channels' catch-up, so a session with many channels
 /// doesn't trip the reverse proxy's rate limit.
 const CATCH_UP_PACING: std::time::Duration = std::time::Duration::from_millis(250);
+/// Tries a channel's catch-up gets after a temporary REST error, the first
+/// one included. The anchor is dropped after the last one fails.
+const CATCH_UP_MAX_ATTEMPTS: u32 = 5;
+/// Wait before the first retry; each later retry doubles it.
+const CATCH_UP_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+/// Longest wait between two tries of the same channel.
+const CATCH_UP_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatchUpPlan {
