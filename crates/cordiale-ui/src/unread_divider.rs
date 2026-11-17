@@ -23,8 +23,7 @@ pub(crate) fn first_unread(
         .filter_map(|message| message.message_id)
         .filter(|id| *id > cursor);
     let first = unread.next()?;
-    let (first, rest) = unread.fold((first, 0), |(first, rest), id| (first.min(id), rest + 1));
-    Some((first, rest + 1))
+    Some((first, unread.count() + 1))
 }
 
 /// Remembers the read cursor of a window that opens, before the window reads
