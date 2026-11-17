@@ -651,6 +651,49 @@ impl Drop for Session {
 static PLAYER: OnceLock<MediaPlayer> = OnceLock::new();
 static CURRENT: AtomicU64 = AtomicU64::new(0);
 
+/// Tickets for chat links that are classified before the viewer opens. A
+/// ticket is taken before the network probe starts; a newer link, a close of
+/// the viewer or a logout makes every older ticket stale.
+pub struct LinkTickets(AtomicU64);
+
+impl LinkTickets {
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// A new ticket; every older ticket is stale from now on.
+    pub fn take(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Makes every ticket taken so far stale.
+    pub fn invalidate(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// True when `ticket` is the newest one and the screen is signed in.
+    pub fn allows(&self, ticket: u64, screen: &str) -> bool {
+        !matches!(screen, "connect" | "splash") && self.0.load(Ordering::SeqCst) == ticket
+    }
+}
+
+static LINK_TICKETS: LinkTickets = LinkTickets::new();
+
+/// Takes a ticket for a link, before its probe starts.
+pub fn link_ticket() -> u64 {
+    LINK_TICKETS.take()
+}
+
+/// Makes every pending link stale: a logout or a close of the viewer.
+pub fn invalidate_links() {
+    LINK_TICKETS.invalidate();
+}
+
+/// True when the link of `ticket` may still change the viewer or the browser.
+pub fn link_allowed(ticket: u64, screen: &str) -> bool {
+    LINK_TICKETS.allows(ticket, screen)
+}
+
 /// The player of the viewer; the first call starts it.
 pub fn shared(ui: &slint::Weak<AppWindow>) -> &'static MediaPlayer {
     PLAYER.get_or_init(|| {
@@ -2260,6 +2303,48 @@ fn audio_or_log(result: Result<AudioSource, String>) -> Option<AudioSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_current_link_ticket_is_allowed() {
+        let tickets = LinkTickets::new();
+        let ticket = tickets.take();
+        assert!(tickets.allows(ticket, "chat"));
+    }
+
+    #[test]
+    fn a_link_ticket_is_stale_after_logout_or_close() {
+        let tickets = LinkTickets::new();
+        let ticket = tickets.take();
+        tickets.invalidate();
+        assert!(!tickets.allows(ticket, "chat"));
+    }
+
+    #[test]
+    fn a_newer_link_makes_the_older_ticket_stale() {
+        let tickets = LinkTickets::new();
+        let first = tickets.take();
+        let second = tickets.take();
+        assert!(!tickets.allows(first, "chat"));
+        assert!(tickets.allows(second, "chat"));
+    }
+
+    #[test]
+    fn a_link_ticket_is_stale_on_the_sign_in_screen() {
+        let tickets = LinkTickets::new();
+        let ticket = tickets.take();
+        assert!(!tickets.allows(ticket, "connect"));
+    }
+
+    #[test]
+    fn a_delayed_probe_is_dropped_after_a_newer_open() {
+        let tickets = LinkTickets::new();
+        // Probe A starts and is still pending when link B opens.
+        let a = tickets.take();
+        let b = tickets.take();
+        // B answers first, then A answers late.
+        assert!(tickets.allows(b, "chat"));
+        assert!(!tickets.allows(a, "chat"));
+    }
 
     #[test]
     fn the_poster_is_the_first_picture_and_stops_early() {

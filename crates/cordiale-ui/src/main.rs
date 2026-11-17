@@ -10877,6 +10877,9 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
     };
     let target = media::link_target(&href, client.base_url());
     let ui = ui.clone();
+    // Taken before the probe starts: a newer link, a close of the viewer or a
+    // logout makes it stale, and then the late answer is dropped.
+    let link = media_player::link_ticket();
     tokio::spawn(async move {
         let (target, hint) = if target == LinkTarget::Browser {
             let on_grappa =
@@ -10909,10 +10912,14 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
             (target, None)
         };
         if target == LinkTarget::Browser {
-            open_in_browser(&href);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                if media_player::link_allowed(link, ui.get_screen().as_str()) {
+                    open_in_browser(&href);
+                }
+            });
             return;
         }
-        show_media(client, token, ui, href, target, hint).await;
+        show_media(client, token, ui, href, target, hint, link).await;
     });
 }
 
@@ -10924,6 +10931,7 @@ async fn show_media(
     href: String,
     target: cordiale_core::media::LinkTarget,
     hint: Option<String>,
+    link: u64,
 ) {
     use cordiale_core::media::{self, FetchError, LinkTarget};
     let title = href
@@ -10937,9 +10945,14 @@ async fn show_media(
     let url = href.clone();
     // The viewer count when this file opens. A close or another file changes
     // the count, and the download that comes after it is then dropped.
-    let ticket = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // It stays at the maximum when the link is stale, so the download that
+    // comes after is dropped.
+    let ticket = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
     let opened = Arc::clone(&ticket);
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        if !media_player::link_allowed(link, ui.get_screen().as_str()) {
+            return;
+        }
         media_player::end();
         opened.store(
             media_player::current(),
