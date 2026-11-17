@@ -12340,9 +12340,10 @@ async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
 /// Settings > Themes pick. An empty key returns to the classic look; a
 /// `server:<id>` key sets the account's active theme on Grappa.
 async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
-    let mut settings = persistence::load_settings().unwrap_or_default();
+    // No settings snapshot is held across the server request: each save
+    // below edits only `color_theme` in the latest settings.
+    let mut new_color_theme: Option<String> = None;
     let choice = if key.is_empty() {
-        settings.color_theme = None;
         None
     } else if let Some(id) = key.strip_prefix("server:") {
         let (Some(client), Some(token), Ok(id)) = (
@@ -12362,8 +12363,9 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
             .filter(|night| *night != id);
         match client.set_active_theme(&token, id, night).await {
             Ok(pair) => {
-                settings.color_theme = Some("server".to_string());
-                let _ = persistence::save_settings(&settings);
+                let _ = persistence::update_settings(|settings| {
+                    settings.color_theme = Some("server".to_string());
+                });
                 state.prefs.theme_pair = theme_pair_choices(&pair);
                 return apply_theme_pair(state, ui);
             }
@@ -12385,11 +12387,13 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
             .find(|choice| choice.key == key)
             .cloned();
         if choice.is_some() {
-            settings.color_theme = Some(key.to_string());
+            new_color_theme = Some(key.to_string());
         }
         choice
     };
-    let _ = persistence::save_settings(&settings);
+    if key.is_empty() || new_color_theme.is_some() {
+        let _ = persistence::update_settings(|settings| settings.color_theme = new_color_theme);
+    }
     state.prefs.theme_pair = None;
     apply_color_theme(state, ui, choice);
 }

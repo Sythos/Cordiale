@@ -421,9 +421,7 @@ impl WindowStateSaver {
 
 /// Stores the state next to every other setting, which stay as they are.
 fn write(state: WindowState) {
-    let mut settings = persistence::load_settings().unwrap_or_default();
-    settings.window = Some(state);
-    let _ = persistence::save_settings(&settings);
+    let _ = persistence::update_settings(|settings| settings.window = Some(state));
 }
 
 #[cfg(test)]
