@@ -1608,6 +1608,10 @@ struct WindowState {
     /// opened, before the window read it. The unread divider reads it; no
     /// other rule does.
     unread_baseline: Option<((String, String), i64)>,
+    /// True while the open channel waits to start at its first unread
+    /// message. Reading the window is held back until the reader reaches the
+    /// bottom or no unread message is found.
+    unread_hold: std::cell::Cell<bool>,
     /// Account-wide unread badge from `/me` or the latest read-cursor push.
     badge_count: u64,
     /// Network slug -> whether its channel list is expanded in the sidebar.
@@ -1880,6 +1884,7 @@ impl WorkerState {
                 window_messages: HashMap::new(),
                 read_cursors: HashMap::new(),
                 unread_baseline: None,
+                unread_hold: std::cell::Cell::new(false),
                 badge_count: 0,
                 expanded_networks: HashMap::new(),
                 channel_entries: Vec::new(),
@@ -2128,6 +2133,10 @@ async fn run_worker(
                         visible,
                         follow_bottom,
                     }) => {
+                        // The reader came back to the bottom: the hold ends.
+                        if visible && follow_bottom {
+                            state.windows.unread_hold.set(false);
+                        }
                         let was_visible_at_bottom =
                             state.windows.chat_visible && state.windows.chat_follow_bottom;
                         if was_visible_at_bottom && (!visible || !follow_bottom) {
@@ -6425,14 +6434,15 @@ fn push_chat_lines_update(
     let denoise = state.denoise_active(key);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    unread_divider::refresh(state, ui);
-    let ui = ui.clone();
-    let _ = ui.upgrade_in_event_loop(move |ui| {
+    let ui_handle = ui.clone();
+    let _ = ui_handle.upgrade_in_event_loop(move |ui| {
         ui.set_current_denoise(denoise);
         let model =
             chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, model);
     });
+    // After the model swap, so the start row is found in the new rows.
+    unread_divider::refresh(state, ui);
 }
 
 /// Flips Denoise for the open channel. The transcript changes at once, then
@@ -8296,7 +8306,10 @@ pub(crate) fn mark_active_window_read(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
 ) -> bool {
-    if !state.windows.chat_visible || !state.windows.chat_follow_bottom {
+    if !state.windows.chat_visible
+        || !state.windows.chat_follow_bottom
+        || state.windows.unread_hold.get()
+    {
         return false;
     }
     if let Some((network, nick)) = open_locked_window(state) {

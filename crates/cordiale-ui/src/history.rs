@@ -313,7 +313,6 @@ fn show_older_history(
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    unread_divider::refresh(state, ui);
     let roster = (!state.windows.current_query).then(|| {
         (
             state
@@ -326,8 +325,8 @@ fn show_older_history(
             state.denoise_active(&key),
         )
     });
-    let ui = ui.clone();
-    let _ = ui.upgrade_in_event_loop(move |ui| {
+    let ui_handle = ui.clone();
+    let _ = ui_handle.upgrade_in_event_loop(move |ui| {
         let model = match roster {
             Some((members, casemapping, denoise)) => {
                 chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise)
@@ -364,6 +363,8 @@ fn show_older_history(
         ui.set_history_failed(false);
         ui.set_history_loading(false);
     });
+    // After the model swap, so the start row is found in the new rows.
+    unread_divider::refresh(state, ui);
 }
 
 /// The top line moves down by `prepended` rows when that many older lines

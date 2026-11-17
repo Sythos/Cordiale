@@ -75,6 +75,10 @@ pub(crate) fn refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
                 state.denoise_active(&key),
             )
         });
+    let start = current_placement(state).map(|placement| placement.start_id);
+    if start.is_none() {
+        state.windows.unread_hold.set(false);
+    }
     let label = format!("{} — {}", key.0, key.1);
     let _ = ui.upgrade_in_event_loop(move |ui| {
         if ui.get_current_channel_label() != label.as_str() || ui.get_unread_divider_dismissed() {
@@ -82,7 +86,7 @@ pub(crate) fn refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         }
         match found {
             Some((id, count)) => {
-                ui.set_unread_divider_label(label.into());
+                ui.set_unread_divider_label(label.clone().into());
                 ui.set_unread_divider_count(i32::try_from(count).unwrap_or(i32::MAX));
                 ui.set_unread_divider_id(id.to_string().into());
             }
@@ -91,5 +95,104 @@ pub(crate) fn refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
                 ui.set_unread_divider_count(0);
             }
         }
+        // The pane starts at the first unread message. The pane places
+        // itself when the start row or the hold changes.
+        let row = start.map_or(-1, |id| row_of(&ui, &id.to_string()));
+        ui.set_unread_start_label(label.into());
+        ui.set_unread_start_row(row);
+        ui.set_unread_start_hold(false);
     });
+}
+
+/// How many read chat messages the pane shows above the first unread one.
+pub(crate) const CONTEXT_MESSAGES: usize = 3;
+
+/// Where the pane starts when a channel opens with unread messages.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Placement {
+    /// The message at the top of the pane.
+    pub(crate) start_id: i64,
+    /// How many read chat messages sit above the first unread message, up to
+    /// `CONTEXT_MESSAGES`. Fewer means older rows may be missing.
+    pub(crate) context: usize,
+}
+
+/// A chat message has a stable id and is not a join, part, quit, nick or mode
+/// line. Date separators are not messages, so they never count.
+fn is_chat_message(message: &RenderedMessage) -> bool {
+    message.message_id.is_some() && !message.presence_noise
+}
+
+/// The message at the top of a pane that starts at the first unread message,
+/// given the read cursor the channel had when it opened. The pane shows up to
+/// `CONTEXT_MESSAGES` chat messages above the first unread message, and all
+/// rows between them. The result is `None` when no shown message is unread.
+pub(crate) fn placement(
+    messages: &[RenderedMessage],
+    cursor: i64,
+    hide_presence: bool,
+) -> Option<Placement> {
+    let shown: Vec<&RenderedMessage> = messages
+        .iter()
+        .filter(|message| !(hide_presence && message.presence_noise))
+        .collect();
+    let first = shown
+        .iter()
+        .position(|message| message.message_id.is_some_and(|id| id > cursor))?;
+    let mut start = first;
+    let mut context = 0;
+    for index in (0..first).rev() {
+        if context == CONTEXT_MESSAGES {
+            break;
+        }
+        if is_chat_message(shown[index]) {
+            context += 1;
+            start = index;
+        }
+    }
+    Some(Placement {
+        start_id: shown[start].message_id?,
+        context,
+    })
+}
+
+/// The placement of the open channel from the messages known now, or `None`
+/// when no baseline is known or nothing is unread.
+pub(crate) fn current_placement(state: &WorkerState) -> Option<Placement> {
+    let key = state.windows.current_channel.as_ref()?;
+    if state.windows.current_query {
+        return None;
+    }
+    let cursor_key = window_state_key(&key.0, &key.1);
+    let (stored, cursor) = state.windows.unread_baseline.as_ref()?;
+    if *stored != cursor_key {
+        return None;
+    }
+    placement(
+        state.transcript.messages.get(key)?,
+        *cursor,
+        state.denoise_active(key),
+    )
+}
+
+/// Whether the open channel starts at an unread message but still lacks read
+/// messages above it that the server may hold.
+pub(crate) fn needs_older_context(state: &WorkerState) -> bool {
+    let Some(key) = state.windows.current_channel.as_ref() else {
+        return false;
+    };
+    current_placement(state).is_some_and(|placement| {
+        placement.context < CONTEXT_MESSAGES
+            && !state.transcript.history_start_reached.contains(key)
+    })
+}
+
+/// The row of the message with `id` in the pane, or -1 when it is not shown.
+pub(crate) fn row_of(ui: &AppWindow, id: &str) -> i32 {
+    use slint::Model as _;
+    ui.get_chat_lines()
+        .iter()
+        .position(|line| line.reply_id.as_str() == id)
+        .and_then(|row| i32::try_from(row).ok())
+        .unwrap_or(-1)
 }
