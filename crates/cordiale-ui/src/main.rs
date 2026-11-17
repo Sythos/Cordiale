@@ -3019,6 +3019,9 @@ async fn run_worker(
                             ui.set_status_retry_secs(0);
                         });
                         request_watch_patterns(&mut state);
+                        // Send again the read cursors that the server did not
+                        // confirm before the socket dropped.
+                        flush_read_cursor_sync(&mut state);
                         // Open the E2E engines and read what the inbox held
                         // while the socket was down.
                         start_e2e_engines(&mut state, &ui).await;
@@ -8314,9 +8317,9 @@ fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)
 /// a task that waits a bounded time between sends. Every call also restarts
 /// idle pending updates, for example after a reconnect.
 fn write_back_read_cursor(state: &mut WorkerState) {
-    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+    if state.conn.client.is_none() || state.conn.token.is_none() {
         return;
-    };
+    }
     if let Some((network, target, message_id)) = read_cursor_to_write(state) {
         // The peer's windows under newer nicks are read with the open DM:
         // their cursors move too, so no unread count is left behind on the
@@ -8346,32 +8349,38 @@ fn write_back_read_cursor(state: &mut WorkerState) {
             }
         }
     }
+    flush_read_cursor_sync(state);
+}
+
+/// Starts one send task for each window that has a pending cursor update and
+/// no running task. It does not move any cursor, so a reconnect can call it.
+fn flush_read_cursor_sync(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
     let idle = match state.windows.read_cursor_sync.lock() {
         Ok(mut sync) => sync.take_idle(),
         Err(_) => return,
     };
-    for key in idle {
+    for (key, ticket) in idle {
         let sync = Arc::clone(&state.windows.read_cursor_sync);
         let client = client.clone();
         let token = token.clone();
         tokio::spawn(async move {
             let mut failures = 0u32;
-            loop {
-                let Some(send) = sync.lock().ok().and_then(|sync| sync.next_send(&key)) else {
-                    break;
-                };
+            while let Some(send) = sync
+                .lock()
+                .ok()
+                .and_then(|mut sync| sync.next_send(&key, ticket))
+            {
                 match client
                     .set_read_cursor(&token, &send.network, &send.target, send.message_id)
                     .await
                 {
                     Ok(stored) => {
                         failures = 0;
-                        let done = sync
-                            .lock()
-                            .map(|mut sync| sync.sent_ok(&key, send.message_id, stored))
-                            .unwrap_or(true);
-                        if done {
-                            break;
+                        if let Ok(mut sync) = sync.lock() {
+                            sync.sent_ok(&key, send.message_id, stored);
                         }
                     }
                     Err(err) => {
@@ -8379,7 +8388,7 @@ fn write_back_read_cursor(state: &mut WorkerState) {
                         failures += 1;
                         if failures >= read_cursor_sync::MAX_SEND_ATTEMPTS {
                             if let Ok(mut sync) = sync.lock() {
-                                sync.release(&key);
+                                sync.release(&key, ticket);
                             }
                             break;
                         }

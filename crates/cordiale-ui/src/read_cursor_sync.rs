@@ -24,8 +24,6 @@ pub(crate) struct PendingReadCursor {
     /// Target as the server needs it in the request path.
     pub(crate) target: String,
     pub(crate) message_id: i64,
-    /// True while one task owns the sending of this window.
-    pub(crate) in_flight: bool,
 }
 
 /// One send job for a window.
@@ -39,6 +37,11 @@ pub(crate) struct ReadCursorSend {
 #[derive(Debug, Default)]
 pub(crate) struct ReadCursorSync {
     pending: HashMap<WindowKey, PendingReadCursor>,
+    /// The ticket of the task that owns the sending of a window. The owner
+    /// stays when a confirmation removes the pending update, so a new update
+    /// for the same window never starts a second task.
+    owners: HashMap<WindowKey, u64>,
+    next_ticket: u64,
 }
 
 /// Delay before send number `attempt` (1 is the first retry): 1 s, 2 s, 4 s,
@@ -65,31 +68,43 @@ impl ReadCursorSync {
                     PendingReadCursor {
                         target: target.to_string(),
                         message_id,
-                        in_flight: false,
                     },
                 );
             }
         }
     }
 
-    /// Takes the windows that have a pending update and no running task. The
-    /// caller starts one task for each returned key.
-    pub(crate) fn take_idle(&mut self) -> Vec<WindowKey> {
-        let mut keys = Vec::new();
-        for (key, entry) in &mut self.pending {
-            if !entry.in_flight {
-                entry.in_flight = true;
-                keys.push(key.clone());
-            }
-        }
+    /// Takes the windows that have a pending update and no owner task. Each
+    /// window gets a new ticket. The caller starts one task for each returned
+    /// key and ticket.
+    pub(crate) fn take_idle(&mut self) -> Vec<(WindowKey, u64)> {
+        let mut keys: Vec<WindowKey> = self
+            .pending
+            .keys()
+            .filter(|key| !self.owners.contains_key(*key))
+            .cloned()
+            .collect();
         keys.sort();
-        keys
+        let mut taken = Vec::new();
+        for key in keys {
+            self.next_ticket += 1;
+            self.owners.insert(key.clone(), self.next_ticket);
+            taken.push((key, self.next_ticket));
+        }
+        taken
     }
 
-    /// The update to send now for a window, or `None` when nothing is
-    /// pending. Then the task owner stops and the window becomes idle.
-    pub(crate) fn next_send(&self, key: &WindowKey) -> Option<ReadCursorSend> {
-        let entry = self.pending.get(key)?;
+    /// The update to send now for a window, or `None` when the ticket does
+    /// not own the window or nothing is pending. With nothing pending, the
+    /// owner ends in the same call, so a new update cannot be lost.
+    pub(crate) fn next_send(&mut self, key: &WindowKey, ticket: u64) -> Option<ReadCursorSend> {
+        if self.owners.get(key) != Some(&ticket) {
+            return None;
+        }
+        let Some(entry) = self.pending.get(key) else {
+            self.owners.remove(key);
+            return None;
+        };
         Some(ReadCursorSend {
             network: key.0.clone(),
             target: entry.target.clone(),
@@ -119,10 +134,10 @@ impl ReadCursorSync {
     }
 
     /// The task for a window stops without confirmation. A later flush starts
-    /// a new task.
-    pub(crate) fn release(&mut self, key: &WindowKey) {
-        if let Some(entry) = self.pending.get_mut(key) {
-            entry.in_flight = false;
+    /// a new task. A task with an old ticket changes nothing.
+    pub(crate) fn release(&mut self, key: &WindowKey, ticket: u64) {
+        if self.owners.get(key) == Some(&ticket) {
+            self.owners.remove(key);
         }
     }
 
@@ -149,9 +164,11 @@ impl ReadCursorSync {
         left
     }
 
-    /// Forgets every pending update (identity change).
+    /// Forgets every pending update and owner (identity change). A task of
+    /// the old identity gets `None` and stops.
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+        self.owners.clear();
     }
 }
 
@@ -168,16 +185,22 @@ mod tests {
         let mut sync = ReadCursorSync::default();
         let window = key("net", "#a");
         sync.queue(window.clone(), "#A", 10);
-        assert_eq!(sync.take_idle(), vec![window.clone()]);
-        let send = sync.next_send(&window).expect("pending send");
+        let taken = sync.take_idle();
+        assert_eq!(taken.len(), 1);
+        let ticket = taken[0].1;
+        let send = sync.next_send(&window, ticket).expect("pending send");
         assert_eq!(send.message_id, 10);
         assert_eq!(send.target, "#A");
         // The POST fails: nothing changes, the update stays.
         assert_eq!(sync.pending_id(&window), Some(10));
         // The retry succeeds.
+        assert!(sync.next_send(&window, ticket).is_some());
         assert!(sync.sent_ok(&window, 10, 10));
         assert_eq!(sync.pending_id(&window), None);
-        assert!(sync.next_send(&window).is_none());
+        assert!(sync.next_send(&window, ticket).is_none());
+        // The owner ended with the last call, so a new update gets a task.
+        sync.queue(window.clone(), "#A", 11);
+        assert_eq!(sync.take_idle().len(), 1);
     }
 
     #[test]
@@ -185,7 +208,6 @@ mod tests {
         let mut sync = ReadCursorSync::default();
         let window = key("net", "#a");
         sync.queue(window.clone(), "#a", 7);
-        sync.release(&window);
         // A push for a lower ID does not confirm.
         sync.confirm(&window, 6);
         assert_eq!(sync.pending_id(&window), Some(7));
@@ -198,11 +220,16 @@ mod tests {
         let mut sync = ReadCursorSync::default();
         let window = key("net", "#a");
         sync.queue(window.clone(), "#a", 5);
-        assert_eq!(sync.take_idle().len(), 1);
-        sync.release(&window);
+        let (_, first) = sync.take_idle().remove(0);
+        sync.release(&window, first);
         sync.queue(window.clone(), "#a", 5);
-        assert_eq!(sync.take_idle(), vec![window.clone()]);
-        assert_eq!(sync.next_send(&window).map(|send| send.message_id), Some(5));
+        let taken = sync.take_idle();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(
+            sync.next_send(&window, taken[0].1)
+                .map(|send| send.message_id),
+            Some(5)
+        );
     }
 
     #[test]
@@ -242,11 +269,42 @@ mod tests {
         let mut sync = ReadCursorSync::default();
         let window = key("net", "#a");
         sync.queue(window.clone(), "#a", 1);
-        assert_eq!(sync.take_idle().len(), 1);
+        let (_, ticket) = sync.take_idle().remove(0);
         sync.queue(window.clone(), "#a", 2);
         assert!(sync.take_idle().is_empty());
-        sync.release(&window);
+        // A stale ticket cannot release the owner.
+        sync.release(&window, ticket + 100);
+        assert!(sync.take_idle().is_empty());
+        sync.release(&window, ticket);
         assert_eq!(sync.take_idle().len(), 1);
+    }
+
+    #[test]
+    fn push_confirmation_keeps_the_owner_so_no_second_task_starts() {
+        let mut sync = ReadCursorSync::default();
+        let window = key("net", "#a");
+        sync.queue(window.clone(), "#a", 1);
+        let (_, ticket) = sync.take_idle().remove(0);
+        // A push confirms the update before the POST answers.
+        sync.confirm(&window, 1);
+        assert_eq!(sync.pending_id(&window), None);
+        // The next read queues a new ID: the old task still owns the window.
+        sync.queue(window.clone(), "#a", 2);
+        assert!(sync.take_idle().is_empty());
+        let send = sync.next_send(&window, ticket).expect("new ID");
+        assert_eq!(send.message_id, 2);
+        // A task with another ticket gets nothing.
+        assert!(sync.next_send(&window, ticket + 1).is_none());
+    }
+
+    #[test]
+    fn clear_stops_the_task_of_the_old_identity() {
+        let mut sync = ReadCursorSync::default();
+        let window = key("net", "#a");
+        sync.queue(window.clone(), "#a", 1);
+        let (_, ticket) = sync.take_idle().remove(0);
+        sync.clear();
+        assert!(sync.next_send(&window, ticket).is_none());
     }
 
     #[test]
@@ -261,8 +319,9 @@ mod tests {
         server.insert(behind.clone(), 2);
         assert_eq!(sync.reconcile(&server), vec![(behind.clone(), 9)]);
         assert_eq!(sync.pending_id(&covered), None);
-        sync.release(&behind);
-        assert_eq!(sync.take_idle(), vec![behind]);
+        let taken = sync.take_idle();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].0, behind);
     }
 
     #[test]
