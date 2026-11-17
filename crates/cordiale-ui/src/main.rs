@@ -3522,17 +3522,24 @@ async fn finish_connect(
             let prefs_client = GrappaClient::new(server_url.clone());
             let prefs_token = token.clone();
             let ui_for_prefs = ui.clone();
+            let prefs_session = begin_prefs_session();
             tokio::spawn(async move {
                 if let Ok(prefs) = prefs_client.fetch_display_prefs(&prefs_token).await {
                     let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
-                        apply_display_prefs(&ui, &prefs);
+                        if prefs_session_matches(prefs_session) {
+                            apply_display_prefs(&ui, &prefs);
+                        }
                     });
                 }
-                load_personal_prefs(&prefs_client, &prefs_token, &ui_for_prefs).await;
+                load_personal_prefs(&prefs_client, &prefs_token, &ui_for_prefs, prefs_session)
+                    .await;
                 let ttl = prefs_client.fetch_upload_ttl(&prefs_token).await;
                 let confirm = prefs_client.fetch_upload_confirm(&prefs_token).await;
                 if let (Ok(ttl), Ok(confirm)) = (ttl, confirm) {
                     let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
+                        if !prefs_session_matches(prefs_session) {
+                            return;
+                        }
                         ui.set_pref_upload_ttl_index(upload_ttl_index(ttl));
                         ui.set_pref_upload_confirm(confirm);
                         ui.set_upload_prefs_loaded(true);
@@ -7224,9 +7231,33 @@ fn ignore_pattern_from_ui(pattern: &str) -> Option<String> {
     (!pattern.is_empty()).then(|| pattern.to_string())
 }
 
+/// Counts the sessions that load account preferences. A load applies its
+/// result only while its number is still the current one.
+static PREFS_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Starts a new preference session and returns its number. A login and a
+/// logout both call it, so each response of an earlier session becomes stale.
+pub(crate) fn begin_prefs_session() -> u64 {
+    PREFS_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+fn prefs_session_is_current(request: u64, current: u64) -> bool {
+    request == current
+}
+
+fn prefs_session_matches(request: u64) -> bool {
+    let current = PREFS_SESSION.load(std::sync::atomic::Ordering::SeqCst);
+    prefs_session_is_current(request, current)
+}
+
 /// Loads the account's away/leave messages, auto-away delay and
 /// peer-profile opt-in into the Settings editors.
-async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Weak<AppWindow>) {
+async fn load_personal_prefs(
+    client: &GrappaClient,
+    token: &str,
+    ui: &slint::Weak<AppWindow>,
+    session: u64,
+) {
     let leave = client.fetch_quit_part_reason(token).await;
     let away = client.fetch_auto_away_reason(token).await;
     let delay = client.fetch_auto_away_debounce(token).await;
@@ -7246,6 +7277,9 @@ async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Wea
         }
     };
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        if !prefs_session_matches(session) {
+            return;
+        }
         ui.set_edit_leave_message(leave.unwrap_or_default().into());
         ui.set_edit_away_message(away.unwrap_or_default().into());
         ui.set_away_nick_suffix_supported(suffix_supported);

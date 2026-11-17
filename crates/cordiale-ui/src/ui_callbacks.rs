@@ -581,6 +581,8 @@ pub(crate) fn register_navigation_callbacks(
         // command later, and a late file of this account must not open.
         crate::e2e_files::invalidate_pending_files();
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
+        // A preference response of the closing session must not apply.
+        begin_prefs_session();
         // The history and the command usage belong to the signed-in account.
         history_for_disconnect.borrow_mut().clear();
         usage_for_disconnect.borrow_mut().clear();
