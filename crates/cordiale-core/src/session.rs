@@ -395,6 +395,110 @@ impl Presence {
     }
 }
 
+/// First wait before a topic is joined again after a `phx_error`.
+const REJOIN_BASE_DELAY: Duration = Duration::from_secs(1);
+/// The wait never grows past this.
+const REJOIN_MAX_DELAY: Duration = Duration::from_secs(30);
+/// A topic that stayed joined this long starts its rejoin wait over.
+const REJOIN_STABLE_AFTER: Duration = Duration::from_secs(60);
+
+/// The wait before the `attempt`-th rejoin (zero based): doubles from
+/// `REJOIN_BASE_DELAY` and stops at `REJOIN_MAX_DELAY`.
+fn rejoin_delay(attempt: u32) -> Duration {
+    REJOIN_BASE_DELAY
+        .saturating_mul(2u32.saturating_pow(attempt.min(16)))
+        .min(REJOIN_MAX_DELAY)
+}
+
+/// Topics that got a `phx_error` and wait for a new join, with a bounded,
+/// growing delay for each. Pure bookkeeping, so the timing rules are
+/// testable without a socket.
+#[derive(Debug, Default)]
+struct RejoinBook {
+    /// Topic to (due time, presence flag).
+    pending: HashMap<String, (Instant, bool)>,
+    /// Topic to (failed attempts in a row, time of the last schedule).
+    history: HashMap<String, (u32, Instant)>,
+}
+
+impl RejoinBook {
+    /// Plans a new join for `topic` and returns the wait.
+    fn schedule(&mut self, topic: &str, presence: bool, now: Instant) -> Duration {
+        let attempts = match self.history.get(topic) {
+            Some(&(attempts, last))
+                if now.saturating_duration_since(last) < REJOIN_STABLE_AFTER =>
+            {
+                attempts
+            }
+            _ => 0,
+        };
+        let delay = rejoin_delay(attempts);
+        self.history
+            .insert(topic.to_string(), (attempts.saturating_add(1), now));
+        self.pending
+            .insert(topic.to_string(), (now + delay, presence));
+        delay
+    }
+
+    fn next_due(&self) -> Option<Instant> {
+        self.pending.values().map(|(due, _)| *due).min()
+    }
+
+    /// Removes and returns the topics whose wait is over.
+    fn take_due(&mut self, now: Instant) -> Vec<(String, bool)> {
+        let due: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, (at, _))| *at <= now)
+            .map(|(topic, _)| topic.clone())
+            .collect();
+        due.into_iter()
+            .filter_map(|topic| {
+                self.pending
+                    .remove(&topic)
+                    .map(|(_, presence)| (topic, presence))
+            })
+            .collect()
+    }
+
+    /// The topic is left on purpose or joined again by the caller.
+    fn cancel(&mut self, topic: &str) {
+        self.pending.remove(topic);
+    }
+
+    /// Removes every waiting topic, for a new connection that joins them all.
+    fn drain(&mut self) -> Vec<(String, bool)> {
+        self.pending
+            .drain()
+            .map(|(topic, (_, presence))| (topic, presence))
+            .collect()
+    }
+}
+
+/// What a topic-level `phx_error` or `phx_close` frame asks of the session.
+#[derive(Debug, PartialEq, Eq)]
+enum TopicEnd {
+    /// The channel process crashed: join the topic again.
+    Error,
+    /// The channel closed on purpose: do not join it again.
+    Close,
+}
+
+/// Reads a topic-level end frame for a topic the session has joined. A frame
+/// of an older join (its `join_ref` differs) is stale and returns `None`.
+fn topic_end(message: &PhoenixMessage, joined: &HashMap<String, JoinedTopic>) -> Option<TopicEnd> {
+    let end = match message.event.as_str() {
+        "phx_error" => TopicEnd::Error,
+        "phx_close" => TopicEnd::Close,
+        _ => return None,
+    };
+    let current = joined.get(&message.topic)?;
+    match message.join_ref.as_deref() {
+        Some(join_ref) if join_ref != current.join_ref => None,
+        _ => Some(end),
+    }
+}
+
 fn visibility_message(
     user_topic: &str,
     join_ref: &str,
@@ -445,12 +549,25 @@ async fn run_session(
     // Grows with every attempt that fails; a connection that stays joined
     // long enough starts it over.
     let mut backoff = Backoff::default();
+    // Topics that got a `phx_error` and wait for a new join.
+    let mut rejoins = RejoinBook::default();
 
     'reconnect: loop {
         if *shutdown.borrow() {
             return;
         }
         presence.topic_lost();
+        // A new connection joins every topic anyway: hand the waiting ones
+        // back to the set it rejoins.
+        for (topic, topic_presence) in rejoins.drain() {
+            joined_topics.insert(
+                topic,
+                JoinedTopic {
+                    join_ref: String::new(),
+                    presence: topic_presence,
+                },
+            );
+        }
         // Set once the user topic is joined: the back-off only resets for a
         // connection that stayed up, not for one that was dropped right after
         // the handshake.
@@ -495,7 +612,7 @@ async fn run_session(
 
         let mut refs = RefCounter::new();
 
-        let user_join_ref = match join(&mut socket, &mut refs, &user_topic, true).await {
+        let mut user_join_ref = match join(&mut socket, &mut refs, &user_topic, true).await {
             Ok(join_ref) => join_ref,
             Err(err) => {
                 let retry_in = backoff.next_delay(Duration::ZERO, None, random_unit());
@@ -561,6 +678,38 @@ async fn run_session(
                     }
                 }
 
+                _ = async {
+                    match rejoins.next_due() {
+                        Some(due) => tokio::time::sleep_until(due.into()).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    for (topic, topic_presence) in rejoins.take_due(Instant::now()) {
+                        match join(&mut socket, &mut refs, &topic, topic_presence).await {
+                            Ok(join_ref) => {
+                                if topic == user_topic {
+                                    user_join_ref = join_ref.clone();
+                                }
+                                joined_topics.insert(
+                                    topic,
+                                    JoinedTopic { join_ref, presence: topic_presence },
+                                );
+                            }
+                            // The socket is broken: the read side ends the
+                            // connection, and the next one joins this topic.
+                            Err(_) => {
+                                joined_topics.insert(
+                                    topic,
+                                    JoinedTopic {
+                                        join_ref: String::new(),
+                                        presence: topic_presence,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+
                 _ = visibility_resend.tick() => {
                     if let Some(visible) = presence.resend() {
                         let message =
@@ -596,12 +745,14 @@ async fn run_session(
                             return;
                         }
                         Some(SessionCommand::JoinTopic { topic, presence }) => {
+                            rejoins.cancel(&topic);
                             let joined = join(&mut socket, &mut refs, &topic, presence).await;
                             if let Ok(join_ref) = joined {
                                 joined_topics.insert(topic, JoinedTopic { join_ref, presence });
                             }
                         }
                         Some(SessionCommand::LeaveTopic { topic }) => {
+                            rejoins.cancel(&topic);
                             if let Some(joined) = joined_topics.remove(&topic) {
                                 let message = leave_message(&topic, &joined, &mut refs);
                                 let _ = socket.send(&message).await;
@@ -625,6 +776,25 @@ async fn run_session(
                 frame = socket.next_message() => {
                     match frame {
                         Ok(Some(message)) => {
+                            match topic_end(&message, &joined_topics) {
+                                // The channel process of one topic crashed
+                                // while the socket stays open: mark the topic
+                                // as not joined and join it again later.
+                                Some(TopicEnd::Error) => {
+                                    if let Some(lost) = joined_topics.remove(&message.topic) {
+                                        if message.topic == user_topic {
+                                            presence.topic_lost();
+                                        }
+                                        rejoins.schedule(&message.topic, lost.presence, Instant::now());
+                                    }
+                                }
+                                // A close is final for that join: the topic
+                                // leaves the set, with no automatic rejoin.
+                                Some(TopicEnd::Close) if message.topic != user_topic => {
+                                    joined_topics.remove(&message.topic);
+                                }
+                                _ => {}
+                            }
                             match user_join_outcome(&message, &user_topic, &user_join_ref) {
                                 Some(Ok(protocol_version)) => {
                                     joined_at = Some(Instant::now());
@@ -1062,5 +1232,242 @@ mod tests {
         );
         assert_eq!(message.event, "phx_leave");
         assert_eq!(message.payload, serde_json::json!({}));
+    }
+
+    #[test]
+    fn rejoin_delay_grows_and_stops_at_the_maximum() {
+        assert_eq!(rejoin_delay(0), Duration::from_secs(1));
+        assert_eq!(rejoin_delay(1), Duration::from_secs(2));
+        assert_eq!(rejoin_delay(4), Duration::from_secs(16));
+        assert_eq!(rejoin_delay(5), REJOIN_MAX_DELAY);
+        assert_eq!(rejoin_delay(u32::MAX), REJOIN_MAX_DELAY);
+    }
+
+    #[test]
+    fn rejoin_book_waits_longer_after_each_failure_and_resets_when_stable() {
+        let mut book = RejoinBook::default();
+        let start = Instant::now();
+        assert_eq!(book.schedule("t", true, start), Duration::from_secs(1));
+        assert_eq!(book.schedule("t", true, start), Duration::from_secs(2));
+        // Another topic has its own count.
+        assert_eq!(book.schedule("u", false, start), Duration::from_secs(1));
+        // A topic that stayed joined for a long time starts over.
+        let later = start + REJOIN_STABLE_AFTER;
+        assert_eq!(book.schedule("t", true, later), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rejoin_book_returns_only_the_due_topics() {
+        let mut book = RejoinBook::default();
+        let start = Instant::now();
+        book.schedule("t", true, start);
+        book.schedule("u", false, start);
+        book.schedule("u", false, start);
+        assert_eq!(book.next_due(), Some(start + Duration::from_secs(1)));
+        assert!(book.take_due(start).is_empty());
+        let due = book.take_due(start + Duration::from_secs(1));
+        assert_eq!(due, vec![("t".to_string(), true)]);
+        book.cancel("u");
+        assert_eq!(book.next_due(), None);
+    }
+
+    #[test]
+    fn topic_end_tells_error_from_close_and_ignores_stale_frames() {
+        let mut joined = HashMap::new();
+        joined.insert(
+            "net".to_string(),
+            JoinedTopic {
+                join_ref: "5".to_string(),
+                presence: true,
+            },
+        );
+        let frame = |event: &str, topic: &str, join_ref: Option<&str>| PhoenixMessage {
+            join_ref: join_ref.map(str::to_string),
+            message_ref: None,
+            topic: topic.to_string(),
+            event: event.to_string(),
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(
+            topic_end(&frame("phx_error", "net", Some("5")), &joined),
+            Some(TopicEnd::Error)
+        );
+        assert_eq!(
+            topic_end(&frame("phx_close", "net", Some("5")), &joined),
+            Some(TopicEnd::Close)
+        );
+        // A frame of an older join, a topic that is not joined and another
+        // event are all ignored.
+        assert_eq!(
+            topic_end(&frame("phx_error", "net", Some("4")), &joined),
+            None
+        );
+        assert_eq!(
+            topic_end(&frame("phx_error", "other", Some("5")), &joined),
+            None
+        );
+        assert_eq!(topic_end(&frame("event", "net", Some("5")), &joined), None);
+    }
+
+    /// A mock Grappa socket for one connection. It acknowledges every
+    /// `phx_join`, reports each join as `(topic, join_ref)` on the returned
+    /// channel, and sends `end_event` on the network topic after its first
+    /// join. After the second join of that topic it pushes a `marker` event
+    /// on it. The user topic gets a `marker` push after the first end frame.
+    async fn mock_session_server(
+        end_event: &'static str,
+    ) -> (
+        String,
+        mpsc::UnboundedReceiver<(String, String)>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!(
+            "ws://{}/socket/websocket",
+            listener.local_addr().expect("address")
+        );
+        let (joins_tx, joins_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            #[allow(clippy::result_large_err)]
+            let select_phoenix =
+                |_request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("phoenix"),
+                    );
+                    Ok(response)
+                };
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, select_phoenix)
+                .await
+                .expect("handshake");
+            let mut net_joins = 0;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let frame = PhoenixMessage::from_json(text.as_str()).expect("frame");
+                if frame.event != "phx_join" {
+                    continue;
+                }
+                let join_ref = frame.join_ref.clone().unwrap_or_default();
+                let _ = joins_tx.send((frame.topic.clone(), join_ref.clone()));
+                let mut outgoing = vec![PhoenixMessage {
+                    join_ref: frame.join_ref.clone(),
+                    message_ref: frame.message_ref.clone(),
+                    topic: frame.topic.clone(),
+                    event: "phx_reply".to_string(),
+                    payload: serde_json::json!({"status": "ok", "response": {}}),
+                }];
+                if frame.topic == "net" {
+                    net_joins += 1;
+                    let (event, topic) = if net_joins == 1 {
+                        (end_event, "net")
+                    } else {
+                        ("marker", "net")
+                    };
+                    outgoing.push(PhoenixMessage {
+                        join_ref: frame.join_ref.clone(),
+                        message_ref: None,
+                        topic: topic.to_string(),
+                        event: event.to_string(),
+                        payload: serde_json::json!({}),
+                    });
+                    if net_joins == 1 {
+                        outgoing.push(PhoenixMessage {
+                            join_ref: None,
+                            message_ref: None,
+                            topic: "grappa:user:bob".to_string(),
+                            event: "marker".to_string(),
+                            payload: serde_json::json!({}),
+                        });
+                    }
+                }
+                for message in outgoing {
+                    let _ = socket
+                        .send(Message::from(message.to_json().expect("json")))
+                        .await;
+                }
+            }
+        });
+        (url, joins_rx, server)
+    }
+
+    async fn next_event(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> SessionEvent {
+        tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("a session event in time")
+            .expect("the session is open")
+    }
+
+    #[tokio::test]
+    async fn phx_error_on_one_topic_joins_it_again_on_the_same_socket() {
+        let (url, mut joins, server) = mock_session_server("phx_error").await;
+        let (handle, mut events) = spawn_session(url, "token".to_string(), "bob".to_string());
+        handle.join_topic("net", true);
+
+        let mut seen_error = false;
+        loop {
+            match next_event(&mut events).await {
+                SessionEvent::Connected { .. } => {}
+                SessionEvent::Frame(frame) if frame.event == "phx_error" => seen_error = true,
+                SessionEvent::Frame(frame) if frame.event == "marker" && frame.topic == "net" => {
+                    break
+                }
+                SessionEvent::Frame(_) => {}
+                other => panic!("the socket must stay open: {other:?}"),
+            }
+        }
+        assert!(seen_error);
+
+        let mut net_refs = Vec::new();
+        let mut user_joins = 0;
+        while let Ok((topic, join_ref)) = joins.try_recv() {
+            if topic == "net" {
+                net_refs.push(join_ref);
+            } else {
+                user_joins += 1;
+            }
+        }
+        // One user join only: the socket did not reconnect.
+        assert_eq!(user_joins, 1);
+        assert_eq!(net_refs.len(), 2);
+        assert_ne!(net_refs[0], net_refs[1]);
+
+        handle.shutdown();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn phx_close_on_one_topic_does_not_join_it_again() {
+        let (url, mut joins, server) = mock_session_server("phx_close").await;
+        let (handle, mut events) = spawn_session(url, "token".to_string(), "bob".to_string());
+        handle.join_topic("net", true);
+
+        // The server sends the close, then a marker on the user topic.
+        loop {
+            match next_event(&mut events).await {
+                SessionEvent::Connected { .. } => {}
+                SessionEvent::Frame(frame) if frame.topic == "grappa:user:bob" => break,
+                SessionEvent::Frame(_) => {}
+                other => panic!("the socket must stay open: {other:?}"),
+            }
+        }
+        // Wait longer than the first rejoin delay: nothing may come.
+        tokio::time::sleep(REJOIN_BASE_DELAY * 2).await;
+        let mut net_joins = 0;
+        while let Ok((topic, _)) = joins.try_recv() {
+            if topic == "net" {
+                net_joins += 1;
+            }
+        }
+        assert_eq!(net_joins, 1);
+
+        handle.shutdown();
+        server.abort();
     }
 }
