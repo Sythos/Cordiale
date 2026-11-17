@@ -438,6 +438,7 @@ const ID_TRACK_ENTRY: u32 = 0xAE;
 const ID_TRACK_NUMBER: u32 = 0xD7;
 const ID_CODEC_ID: u32 = 0x86;
 const ID_CODEC_PRIVATE: u32 = 0x63A2;
+const ID_DEFAULT_DURATION: u32 = 0x23_E383;
 const ID_VIDEO: u32 = 0xE0;
 const ID_PIXEL_WIDTH: u32 = 0xB0;
 const ID_PIXEL_HEIGHT: u32 = 0xBA;
@@ -474,6 +475,13 @@ fn vint(data: &[u8], at: usize, keep_marker: bool) -> Option<(Option<u64>, usize
     Some((Some(value), length))
 }
 
+/// An EBML lace size at `at`: the value and its length. All-ones is a valid
+/// value here, not the "unknown" size of an element.
+fn lace_vint(data: &[u8], at: usize) -> Option<(u64, usize)> {
+    let (value, length) = vint(data, at, true)?;
+    Some((value? & ((1u64 << (7 * length)) - 1), length))
+}
+
 #[derive(Default)]
 struct Entry {
     number: u64,
@@ -481,6 +489,8 @@ struct Entry {
     private: Vec<u8>,
     width: u32,
     height: u32,
+    /// `DefaultDuration` in nanoseconds, 0 when the track has none.
+    default_duration_ns: u64,
 }
 
 #[derive(Default)]
@@ -489,8 +499,101 @@ struct Walker {
     duration: f64,
     entries: Vec<Entry>,
     cluster_time: i64,
-    /// Track number, offset, size, time in timecode units, key frame.
-    blocks: Vec<(u64, usize, usize, i64, bool)>,
+    /// Track number, offset, size, time in timecode units, key frame and
+    /// whether the frame follows another frame of the same laced block.
+    blocks: Vec<(u64, usize, usize, i64, bool, bool)>,
+    /// The first malformed laced block.
+    error: Option<String>,
+}
+
+/// The frames of a block payload as (offset, size) pairs relative to the
+/// payload start. `lacing` is the lacing field of the block flags.
+fn lace_frames(payload: &[u8], lacing: u8) -> Result<Vec<(usize, usize)>, String> {
+    if lacing == 0 {
+        return Ok(vec![(0, payload.len())]);
+    }
+    let count = usize::from(*payload.first().ok_or("laced block has no frame count")?) + 1;
+    let mut at = 1usize;
+    let mut sizes: Vec<usize> = Vec::with_capacity(count);
+    match lacing {
+        // Xiph: each size is a run of 255 bytes closed by a smaller byte.
+        1 => {
+            for _ in 1..count {
+                let mut size = 0usize;
+                loop {
+                    let byte = *payload.get(at).ok_or("truncated Xiph lacing sizes")?;
+                    at += 1;
+                    size = size
+                        .checked_add(usize::from(byte))
+                        .ok_or("Xiph frame size overflows")?;
+                    if byte != 255 {
+                        break;
+                    }
+                }
+                sizes.push(size);
+            }
+        }
+        // Fixed size: the frames share the payload equally.
+        2 => {
+            let rest = payload.len() - at;
+            if !rest.is_multiple_of(count) {
+                return Err("fixed-size lacing does not divide the payload".to_string());
+            }
+            sizes.resize(count - 1, rest / count);
+        }
+        // EBML: the first size, then signed differences.
+        _ => {
+            let (first, length) = lace_vint(payload, at).ok_or("truncated EBML lacing sizes")?;
+            at += length;
+            let mut size = i64::try_from(first).map_err(|_| "EBML frame size overflows")?;
+            if count > 1 {
+                sizes.push(usize::try_from(size).map_err(|_| "EBML frame size overflows")?);
+            }
+            for _ in 2..count {
+                let (raw, length) = lace_vint(payload, at).ok_or("truncated EBML lacing sizes")?;
+                at += length;
+                let raw = i64::try_from(raw).map_err(|_| "EBML frame size overflows")?;
+                let bias = (1i64 << (7 * length - 1)) - 1;
+                size = size
+                    .checked_add(raw - bias)
+                    .ok_or("EBML frame size overflows")?;
+                sizes.push(usize::try_from(size).map_err(|_| "EBML frame size is negative")?);
+            }
+        }
+    }
+    // The last frame takes what the other frames leave.
+    let mut frames = Vec::with_capacity(count);
+    let mut offset = at;
+    for size in sizes {
+        let end = offset
+            .checked_add(size)
+            .filter(|end| *end <= payload.len())
+            .ok_or("laced frame runs past the block")?;
+        frames.push((offset, size));
+        offset = end;
+    }
+    if offset > payload.len() {
+        return Err("laced sizes run past the block".to_string());
+    }
+    frames.push((offset, payload.len() - offset));
+    Ok(frames)
+}
+
+/// The duration in microseconds of an Opus packet, from its first bytes.
+fn opus_packet_us(packet: &[u8]) -> Option<i64> {
+    let toc = *packet.first()?;
+    let config = toc >> 3;
+    let frame_us: i64 = match config {
+        0..=11 => [10_000, 20_000, 40_000, 60_000][usize::from(config % 4)],
+        12..=15 => [10_000, 20_000][usize::from(config % 2)],
+        _ => [2_500, 5_000, 10_000, 20_000][usize::from(config % 4)],
+    };
+    let frames = match toc & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => i64::from(*packet.get(1)? & 0x3F),
+    };
+    Some(frame_us * frames)
 }
 
 fn unsigned(body: &[u8]) -> u64 {
@@ -571,6 +674,11 @@ impl Walker {
                     entry.height = unsigned(body) as u32;
                 }
             }
+            ID_DEFAULT_DURATION => {
+                if let Some(entry) = self.entries.last_mut() {
+                    entry.default_duration_ns = unsigned(body);
+                }
+            }
             ID_CLUSTER_TIMECODE => self.cluster_time = unsigned(body) as i64,
             ID_SIMPLE_BLOCK => self.block(body, base, None),
             // A block in a group has no key frame flag; it is taken as one.
@@ -586,19 +694,33 @@ impl Walker {
         let (Some(relative), Some(flags)) = (be16(body, length), body.get(length + 2)) else {
             return;
         };
-        // Laced blocks are not read.
-        if flags & 0x06 != 0 || self.blocks.len() >= MAX_SAMPLES {
+        if self.blocks.len() >= MAX_SAMPLES {
             return;
         }
         let key = group_key.unwrap_or(flags & 0x80 != 0);
         let header = length + 3;
-        self.blocks.push((
-            track,
-            base + header,
-            body.len() - header,
-            self.cluster_time + i64::from(relative as i16),
-            key,
-        ));
+        let frames = match lace_frames(&body[header..], (flags >> 1) & 3) {
+            Ok(frames) => frames,
+            Err(reason) => {
+                if self.error.is_none() {
+                    self.error = Some(format!("laced block of track {track}: {reason}"));
+                }
+                return;
+            }
+        };
+        for (index, (offset, size)) in frames.into_iter().enumerate() {
+            if self.blocks.len() >= MAX_SAMPLES {
+                break;
+            }
+            self.blocks.push((
+                track,
+                base + header + offset,
+                size,
+                self.cluster_time + i64::from(relative as i16),
+                key && index == 0,
+                index > 0,
+            ));
+        }
     }
 }
 
@@ -609,18 +731,21 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
         ..Walker::default()
     };
     walker.walk(data, 0, 0);
+    if let Some(error) = walker.error.take() {
+        return Err(error);
+    }
     let unit_us = |ticks: i64| ticks.saturating_mul(walker.scale_ns as i64) / 1000;
     let mut media = WebmMedia::default();
     if walker.duration > 0.0 {
         media.duration_us = Some(unit_us(walker.duration as i64));
     }
     for entry in &walker.entries {
-        let samples = || -> Vec<(usize, usize, i64, bool)> {
+        let samples = || -> Vec<(usize, usize, i64, bool, bool)> {
             walker
                 .blocks
                 .iter()
                 .filter(|block| block.0 == entry.number)
-                .map(|block| (block.1, block.2, unit_us(block.3), block.4))
+                .map(|block| (block.1, block.2, unit_us(block.3), block.4, block.5))
                 .collect()
         };
         match entry.codec.as_str() {
@@ -638,7 +763,7 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
                     nal_length_size: length_size,
                     samples: list
                         .into_iter()
-                        .map(|(offset, size, pts_us, key)| Sample {
+                        .map(|(offset, size, pts_us, key, _)| Sample {
                             offset,
                             size,
                             pts_us: pts_us - first,
@@ -654,10 +779,7 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
                 media.audio = Some(OpusTrack {
                     channels: channels.clamp(1, 2),
                     pre_skip,
-                    packets: samples()
-                        .into_iter()
-                        .map(|(offset, size, pts_us, _)| (offset, size, pts_us))
-                        .collect(),
+                    packets: audio_packets(data, samples(), entry, true),
                 });
             }
             "A_VORBIS" if media.audio.is_none() && media.vorbis.is_none() => {
@@ -666,10 +788,7 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
                         channels,
                         sample_rate,
                         headers,
-                        packets: samples()
-                            .into_iter()
-                            .map(|(offset, size, pts_us, _)| (offset, size, pts_us))
-                            .collect(),
+                        packets: audio_packets(data, samples(), entry, false),
                     });
                 }
             }
@@ -680,6 +799,37 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
         return Err("no video track".to_string());
     }
     Ok(media)
+}
+
+/// The audio packets of a track. A frame that follows another frame of a
+/// laced block starts when the previous frame ends.
+fn audio_packets(
+    data: &[u8],
+    list: Vec<(usize, usize, i64, bool, bool)>,
+    entry: &Entry,
+    opus: bool,
+) -> Vec<(usize, usize, i64)> {
+    let default_us = i64::try_from(entry.default_duration_ns / 1000).unwrap_or(0);
+    let mut out: Vec<(usize, usize, i64)> = Vec::with_capacity(list.len());
+    for (offset, size, pts_us, _, continued) in list {
+        let mut pts_us = pts_us;
+        if continued {
+            if let Some(&(previous, previous_size, previous_pts)) = out.last() {
+                let duration = if default_us > 0 {
+                    default_us
+                } else if opus {
+                    data.get(previous..previous.saturating_add(previous_size))
+                        .and_then(opus_packet_us)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                pts_us = previous_pts.saturating_add(duration);
+            }
+        }
+        out.push((offset, size, pts_us));
+    }
+    out
 }
 
 /// The codec of a WebM video track, with its NAL length size and parameter
@@ -1104,6 +1254,133 @@ mod tests {
         assert!(vorbis_headers(&vorbis_private(2, 0, &[5])).is_none());
         // A size that runs past the data.
         assert!(vorbis_headers(&[2, 255, 255, 1]).is_none());
+    }
+
+    /// A WebM file with a video track and an Opus track whose only block has
+    /// the given flags and laced payload.
+    fn laced_opus_file(flags: u8, laced: &[u8]) -> Vec<u8> {
+        let mut video = element(&[0xD7], &[1]);
+        video.extend(element(&[0x86], b"V_VP8"));
+        let mut audio = element(&[0xD7], &[2]);
+        audio.extend(element(&[0x86], b"A_OPUS"));
+        let mut tracks = element(&[0xAE], &video);
+        tracks.extend(element(&[0xAE], &audio));
+        let mut block = vec![0x82, 0, 0, flags];
+        block.extend_from_slice(laced);
+        let mut cluster = element(&[0xE7], &[0]);
+        cluster.extend(element(&[0xA3], &block));
+        let mut segment = element(&[0x16, 0x54, 0xAE, 0x6B], &tracks);
+        segment.extend(element(&[0x1F, 0x43, 0xB6, 0x75], &cluster));
+        element(&[0x18, 0x53, 0x80, 0x67], &segment)
+    }
+
+    #[test]
+    fn xiph_laced_opus_frames_are_all_returned_in_order() {
+        // Frames of 1, 2 and 3 bytes; TOC 0xF8 is a 20 ms CELT frame.
+        let file = laced_opus_file(0x02, &[2, 1, 2, 0xF8, 0xF8, 1, 0xF8, 2, 3]);
+        let packets = webm(&file).expect("media").audio.expect("audio").packets;
+        assert_eq!(packets.len(), 3);
+        assert_eq!(
+            packets.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(packets[0].0 < packets[1].0 && packets[1].0 < packets[2].0);
+        assert_eq!(
+            packets.iter().map(|p| p.2).collect::<Vec<_>>(),
+            vec![0, 20_000, 40_000]
+        );
+    }
+
+    #[test]
+    fn fixed_laced_opus_frames_share_the_payload() {
+        let file = laced_opus_file(0x04, &[1, 0xF8, 1, 0xF8, 2]);
+        let packets = webm(&file).expect("media").audio.expect("audio").packets;
+        assert_eq!(packets.iter().map(|p| p.1).collect::<Vec<_>>(), vec![2, 2]);
+    }
+
+    #[test]
+    fn ebml_laced_opus_frames_use_signed_differences() {
+        // Sizes 3, then 2 (difference -1) and the 1 byte that remains.
+        let file = laced_opus_file(0x06, &[2, 0x83, 0xBE, 0xF8, 1, 2, 0xF8, 3, 4]);
+        let packets = webm(&file).expect("media").audio.expect("audio").packets;
+        assert_eq!(
+            packets.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn a_block_without_lacing_gives_one_packet() {
+        let packets = webm(&laced_opus_file(0x00, &[0xF8, 1]))
+            .expect("media")
+            .audio
+            .expect("audio")
+            .packets;
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].1, 2);
+    }
+
+    #[test]
+    fn lace_frames_reads_every_mode() {
+        assert_eq!(lace_frames(&[1, 2, 3], 0).unwrap(), vec![(0, 3)]);
+        assert_eq!(
+            lace_frames(&[1, 2, 9, 9, 9], 1).unwrap(),
+            vec![(2, 2), (4, 1)]
+        );
+        assert_eq!(lace_frames(&[1, 7, 7], 2).unwrap(), vec![(1, 1), (2, 1)]);
+        assert_eq!(
+            lace_frames(&[1, 0x82, 5, 5, 5], 3).unwrap(),
+            vec![(2, 2), (4, 1)]
+        );
+        // An EBML size with all bits set is a value: 127 bytes.
+        let mut ebml = vec![1, 0xFF];
+        ebml.extend(vec![0u8; 128]);
+        assert_eq!(lace_frames(&ebml, 3).unwrap(), vec![(2, 127), (129, 1)]);
+        // A difference of +64 is also all ones: sizes 1, 65 and 1.
+        let mut ebml = vec![2, 0x81, 0xFF];
+        ebml.extend(vec![0u8; 67]);
+        assert_eq!(
+            lace_frames(&ebml, 3).unwrap(),
+            vec![(3, 1), (4, 65), (69, 1)]
+        );
+        // A Xiph size of 255 continues in the next byte.
+        let mut xiph = vec![1, 255, 1];
+        xiph.extend(vec![0u8; 257]);
+        assert_eq!(lace_frames(&xiph, 1).unwrap(), vec![(3, 256), (259, 1)]);
+    }
+
+    #[test]
+    fn malformed_lacing_is_refused() {
+        assert!(lace_frames(&[], 1).is_err());
+        // Truncated Xiph sizes.
+        assert!(lace_frames(&[2, 255], 1).is_err());
+        // A frame larger than the block.
+        assert!(lace_frames(&[1, 9, 1], 1).is_err());
+        // Fixed size that does not divide the payload.
+        assert!(lace_frames(&[1, 1, 2, 3], 2).is_err());
+        // EBML: truncated, frame past the block, negative size.
+        assert!(lace_frames(&[2, 0x81], 3).is_err());
+        assert!(lace_frames(&[1, 0xFF, 1], 3).is_err());
+        assert!(lace_frames(&[2, 0x81, 0x80, 1, 1], 3).is_err());
+        // A large frame count with no data.
+        assert!(lace_frames(&[255, 1], 1).is_err());
+        // The error reaches the caller of `webm`.
+        assert!(webm(&laced_opus_file(0x02, &[1, 9, 1])).is_err());
+    }
+
+    #[test]
+    fn a_video_only_file_has_no_audio_and_no_error() {
+        let media = webm(&webm_file("V_VP8", &[], &[])).expect("media");
+        assert!(media.audio.is_none() && media.vorbis.is_none());
+    }
+
+    #[test]
+    fn opus_packet_durations_follow_the_toc() {
+        assert_eq!(opus_packet_us(&[0xF8]), Some(20_000));
+        assert_eq!(opus_packet_us(&[0xF9]), Some(40_000));
+        assert_eq!(opus_packet_us(&[0xFB, 3]), Some(60_000));
+        assert_eq!(opus_packet_us(&[0x00]), Some(10_000));
+        assert_eq!(opus_packet_us(&[]), None);
     }
 
     #[test]
