@@ -403,7 +403,9 @@ pub(crate) fn open_e2e_file(
     let ui = ui.clone();
     // The flag of this session: a disconnect or a new sign-in cancels it, and
     // the result of this request is then dropped.
-    let session = Arc::clone(&state.conn.shrink_cancel);
+    // A logout also bumps the epoch at once, before the worker sees the
+    // disconnect, so a late result of the old account is dropped.
+    let session = Arc::new(FileRequest::new(Arc::clone(&state.conn.shrink_cancel)));
     tokio::spawn(async move {
         let name = valid.name.clone();
         let ciphertext = match client.fetch_encrypted_file(&valid).await {
@@ -437,9 +439,46 @@ pub(crate) fn open_e2e_file(
     });
 }
 
+/// Counts the logouts and account switches. The UI thread bumps it at the
+/// start of a logout, so it does not wait for the serial worker.
+static SESSION_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Makes every pending request for an encrypted file stale. Call it before
+/// the screen changes at a logout or an account switch.
+pub(crate) fn invalidate_pending_files() {
+    SESSION_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A request for an encrypted file: the flag of its session and the epoch at
+/// its start.
+pub(crate) struct FileRequest {
+    flag: Arc<CancelFlag>,
+    counter: &'static std::sync::atomic::AtomicU64,
+    epoch: u64,
+}
+
+impl FileRequest {
+    fn new(flag: Arc<CancelFlag>) -> Self {
+        Self::with_counter(flag, &SESSION_EPOCH)
+    }
+
+    fn with_counter(flag: Arc<CancelFlag>, counter: &'static std::sync::atomic::AtomicU64) -> Self {
+        FileRequest {
+            flag,
+            counter,
+            epoch: counter.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.is_cancelled()
+            || self.epoch != self.counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// True when the session that started the request has ended. The result is
 /// then dropped, and the temporary file of the result, if any, is removed.
-fn drop_if_stale(session: &CancelFlag, temp: Option<&std::path::Path>) -> bool {
+fn drop_if_stale(session: &FileRequest, temp: Option<&std::path::Path>) -> bool {
     let stale = session.is_cancelled();
     if stale {
         if let Some(path) = temp {
@@ -455,7 +494,7 @@ fn show_decrypted(
     ui: &slint::Weak<AppWindow>,
     file: &e2e_file::ValidFile,
     plain: Vec<u8>,
-    session: Arc<CancelFlag>,
+    session: Arc<FileRequest>,
 ) {
     if drop_if_stale(&session, None) {
         return;
@@ -543,7 +582,7 @@ mod tests {
 
     #[test]
     fn a_result_of_the_active_session_is_kept_with_its_temporary_file() {
-        let session = CancelFlag::default();
+        let session = FileRequest::new(Arc::default());
         // Own directory: the shared private directory can be removed by
         // another test that runs at the same time.
         let dir = tempfile::tempdir().expect("dir");
@@ -556,8 +595,8 @@ mod tests {
     #[test]
     fn a_result_after_a_disconnect_is_dropped_and_its_file_is_removed() {
         // A disconnect cancels the flag of the session.
-        let session = CancelFlag::default();
-        session.cancel();
+        let session = FileRequest::new(Arc::default());
+        session.flag.cancel();
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("e2e-media.png");
         std::fs::write(&path, b"plain").unwrap();
@@ -570,11 +609,31 @@ mod tests {
         // `cancel_video_shrinks` cancels the old flag and gives the next
         // session a new one: the request keeps the old flag.
         let first = std::sync::Arc::new(CancelFlag::default());
-        let request = std::sync::Arc::clone(&first);
+        let request = FileRequest::new(std::sync::Arc::clone(&first));
         first.cancel();
-        let second = std::sync::Arc::new(CancelFlag::default());
+        let second = FileRequest::new(std::sync::Arc::new(CancelFlag::default()));
         assert!(drop_if_stale(&request, None));
         assert!(!drop_if_stale(&second, None));
+    }
+
+    #[test]
+    fn a_logout_makes_a_pending_request_stale_before_the_worker_acts() {
+        // The worker waits on a REST call: nobody cancels the flag. The UI
+        // bumps the epoch at the logout, then the result arrives late.
+        // Own counter: the global one is shared with parallel tests.
+        let counter: &'static std::sync::atomic::AtomicU64 =
+            Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
+        let held = FileRequest::with_counter(Arc::default(), counter);
+        assert!(!held.flag.is_cancelled());
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("e2e-media.png");
+        std::fs::write(&path, b"plain").unwrap();
+        assert!(drop_if_stale(&held, Some(&path)));
+        assert!(!path.exists());
+        // A request of the next session is valid.
+        let next = FileRequest::with_counter(Arc::default(), counter);
+        assert!(!drop_if_stale(&next, None));
     }
 
     #[test]
