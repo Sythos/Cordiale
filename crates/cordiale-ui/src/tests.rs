@@ -5340,13 +5340,28 @@ fn response_after_logout_is_ignored() {
     assert!(prefs_session_is_current(2, 2));
 }
 
+/// One test owns the global counters, so parallel tests cannot change them.
 #[test]
-fn prefs_session_counter_makes_old_sessions_stale() {
+fn prefs_session_counter_and_loaded_session_follow_login_and_logout() {
     let first = begin_prefs_session();
     assert!(prefs_session_matches(first));
+    // Account A answers fast: its values are loaded and Save is allowed.
+    assert!(mark_prefs_loaded(first));
+    assert_eq!(loaded_prefs_session(), Some(first));
+    // Logout and login as B: A is stale and Save has no loaded session.
+    begin_prefs_session();
     let second = begin_prefs_session();
     assert!(!prefs_session_matches(first));
     assert!(prefs_session_matches(second));
+    assert_eq!(loaded_prefs_session(), None);
+    // A late response of A cannot mark the preferences as loaded.
+    assert!(!mark_prefs_loaded(first));
+    assert_eq!(loaded_prefs_session(), None);
+    // B answers: only B can be saved.
+    assert!(mark_prefs_loaded(second));
+    assert_eq!(loaded_prefs_session(), Some(second));
+    assert!(!mark_prefs_loaded(first));
+    assert_eq!(loaded_prefs_session(), Some(second));
 }
 
 #[test]

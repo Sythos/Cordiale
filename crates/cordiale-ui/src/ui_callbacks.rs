@@ -2153,7 +2153,12 @@ pub(crate) fn register_settings_callbacks(
     let weak_for_personal = ui.as_weak();
     ui.on_personal_prefs_save_requested(move || {
         if let Some(ui) = weak_for_personal.upgrade() {
+            // Save only values that the current session loaded.
+            let Some(session) = loaded_prefs_session() else {
+                return;
+            };
             let _ = tx_for_personal.send(WorkerCommand::PersonalPrefsSave {
+                session,
                 leave_message: ui.get_edit_leave_message().to_string(),
                 away_message: ui.get_edit_away_message().to_string(),
                 away_delay: ui.get_edit_away_delay().to_string(),

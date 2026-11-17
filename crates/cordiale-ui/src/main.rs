@@ -520,6 +520,7 @@ enum WorkerCommand {
     /// A new account default ban form picked in Settings.
     BanTypeSave(cordiale_core::ban::BanType),
     PersonalPrefsSave {
+        session: u64,
         leave_message: String,
         away_message: String,
         away_delay: String,
@@ -2781,6 +2782,7 @@ async fn run_worker(
                         run_ban_type_save(&mut state, &ui, ban_type).await;
                     }
                     Some(WorkerCommand::PersonalPrefsSave {
+                        session,
                         leave_message,
                         away_message,
                         away_delay,
@@ -2790,6 +2792,7 @@ async fn run_worker(
                         run_personal_prefs_save(
                             &mut state,
                             &ui,
+                            session,
                             leave_message,
                             away_message,
                             away_delay,
@@ -3589,7 +3592,8 @@ async fn finish_connect(
                 ui.set_window_invite_inviter("".into());
                 ui.set_recover_visible(false);
                 ui.set_dcc_offers(slint::ModelRc::default());
-                ui.set_personal_prefs_loaded(false);
+                // A fast response of this session may already be on screen.
+                ui.set_personal_prefs_loaded(loaded_prefs_session() == Some(prefs_session));
                 ui.set_server_upload_limits_known(false);
                 ui.set_server_auto_away_default("".into());
                 ui.set_current_query(false);
@@ -7250,6 +7254,26 @@ fn prefs_session_matches(request: u64) -> bool {
     prefs_session_is_current(request, current)
 }
 
+/// The session whose personal preferences are on screen. Zero means none.
+static PREFS_LOADED_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Marks the personal preferences of `session` as loaded. It refuses a
+/// session that is no longer current and returns whether it accepted.
+fn mark_prefs_loaded(session: u64) -> bool {
+    if !prefs_session_matches(session) {
+        return false;
+    }
+    PREFS_LOADED_SESSION.store(session, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+/// Returns the current session when its personal preferences are loaded.
+/// Save sends values only for this session.
+pub(crate) fn loaded_prefs_session() -> Option<u64> {
+    let loaded = PREFS_LOADED_SESSION.load(std::sync::atomic::Ordering::SeqCst);
+    (loaded != 0 && prefs_session_matches(loaded)).then_some(loaded)
+}
+
 /// Loads the account's away/leave messages, auto-away delay and
 /// peer-profile opt-in into the Settings editors.
 async fn load_personal_prefs(
@@ -7286,7 +7310,7 @@ async fn load_personal_prefs(
         ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
         ui.set_edit_away_delay(away_delay_text(delay).into());
         ui.set_pref_show_peer_profiles(peers);
-        ui.set_personal_prefs_loaded(true);
+        ui.set_personal_prefs_loaded(mark_prefs_loaded(session));
     });
 }
 
@@ -7314,12 +7338,18 @@ fn parse_away_delay(text: &str) -> Result<Option<i64>, ()> {
 async fn handle_personal_prefs_save(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
+    session: u64,
     leave_message: String,
     away_message: String,
     away_delay: String,
     show_peer_profiles: bool,
     away_nick_suffix: Option<String>,
 ) {
+    // The values belong to the session that loaded them. Another account may
+    // own the client now.
+    if !prefs_session_matches(session) {
+        return;
+    }
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
