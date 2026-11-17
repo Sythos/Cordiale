@@ -5051,6 +5051,14 @@ fn handle_mentions_bundle(
     // The summary rows after the away period (and reason) are the messages;
     // the rows before them have nowhere to go.
     let jumps = parse_mention_jumps(payload);
+    state
+        .panels
+        .offline_mentions
+        .retain(|(network, _), _| network != &view.network);
+    state
+        .panels
+        .offline_mentions
+        .extend(offline_mention_queues(&view.network, &jumps));
     let leading = view.rows.len().saturating_sub(jumps.len());
     let mut row_jumps = vec![None; leading];
     row_jumps.extend(jumps.into_iter().map(Some));
@@ -5058,6 +5066,7 @@ fn handle_mentions_bundle(
         .panels
         .mention_jumps
         .insert(view.network.clone(), row_jumps);
+    push_offline_mention_badge(state, ui);
     show_reply_view(state, ui, view);
 }
 

@@ -628,6 +628,11 @@ pub(crate) fn register_navigation_callbacks(
         }
     });
 
+    let tx_for_offline_mention = worker_tx.clone();
+    ui.on_offline_mention_visit_requested(move || {
+        let _ = tx_for_offline_mention.send(WorkerCommand::VisitOfflineMention);
+    });
+
     // A chat pane rebuilt after a round trip through another screen (the
     // media viewer, settings...) asks here where the reader was. The line
     // is picked from the saved scroll state right away, but only put back

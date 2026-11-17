@@ -4224,3 +4224,7 @@ msgstr "Il suono in riproduzione non ha potuto passare alla nuova uscita audio. 
 msgctxt "AppWindow"
 msgid "Audio output applied."
 msgstr "Uscita audio applicata."
+
+msgctxt "AppWindow"
+msgid "Next mention ({})"
+msgstr "Prossima menzione ({})"

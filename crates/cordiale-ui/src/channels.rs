@@ -41,6 +41,7 @@ pub(crate) async fn handle_select_channel(
     state.windows.current_query = false;
     state.windows.current_query_ready = false;
     open_window(state, &key);
+    push_offline_mention_badge(state, ui);
     // `/boot` may bring no rows for the channel, or only a few: read the
     // newest page instead of waiting for a live message. The request runs
     // only after the pane shows this window, so the composer never sends to
