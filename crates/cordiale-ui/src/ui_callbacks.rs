@@ -577,6 +577,9 @@ pub(crate) fn register_navigation_callbacks(
     let history_for_disconnect = input_history.clone();
     let usage_for_disconnect = command_usage.clone();
     ui.on_disconnect_requested(move || {
+        // Before the screen changes: the worker may be busy and handle the
+        // command later, and a late file of this account must not open.
+        crate::e2e_files::invalidate_pending_files();
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
         // The history and the command usage belong to the signed-in account.
         history_for_disconnect.borrow_mut().clear();
