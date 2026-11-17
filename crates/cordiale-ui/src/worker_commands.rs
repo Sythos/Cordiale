@@ -359,9 +359,11 @@ pub(crate) async fn run_admin_network_save(
 }
 
 /// Body of the `WorkerCommand::PersonalPrefsSave` arm of `run_worker`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_personal_prefs_save(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
+    session: u64,
     leave_message: String,
     away_message: String,
     away_delay: String,
@@ -371,6 +373,7 @@ pub(crate) async fn run_personal_prefs_save(
     handle_personal_prefs_save(
         state,
         ui,
+        session,
         leave_message,
         away_message,
         away_delay,
