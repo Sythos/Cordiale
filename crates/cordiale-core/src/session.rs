@@ -53,6 +53,11 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// The longest wait for the reply to a heartbeat. A connection with no reply
 /// by then is treated as dead and the session reconnects.
 const HEARTBEAT_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest wait for one connection attempt: TCP connect, TLS and the
+/// WebSocket upgrade together. An attempt that has not finished by then
+/// fails like any other connect error and goes to the reconnect back-off.
+/// Slow networks need a generous value. The heartbeat timeouts do not use it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The heartbeat of one connection: the ref of the heartbeat that has no
 /// reply yet, and the time it was sent. Every connection makes a new one, so
@@ -99,6 +104,7 @@ impl HeartbeatWatch {
 struct HeartbeatTiming {
     interval: Duration,
     reply_timeout: Duration,
+    connect_timeout: Duration,
 }
 
 impl Default for HeartbeatTiming {
@@ -106,6 +112,7 @@ impl Default for HeartbeatTiming {
         Self {
             interval: HEARTBEAT_INTERVAL,
             reply_timeout: HEARTBEAT_REPLY_TIMEOUT,
+            connect_timeout: CONNECT_TIMEOUT,
         }
     }
 }
@@ -419,6 +426,34 @@ async fn wait_before_reconnect(delay: Duration, shutdown: &mut watch::Receiver<b
     !stopped && !*shutdown.borrow()
 }
 
+/// Runs one connection attempt with a deadline. The attempt future is dropped
+/// on timeout or shutdown, which closes the pending socket. Returns `None`
+/// when the session was shut down, or its handle dropped, during the attempt.
+async fn connect_bounded(
+    ws_url: &str,
+    token: &str,
+    deadline: Duration,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<Result<PhoenixSocket, PhoenixSocketError>> {
+    if *shutdown.borrow() {
+        return None;
+    }
+    tokio::select! {
+        result = tokio::time::timeout(deadline, PhoenixSocket::connect(ws_url, token)) => {
+            Some(result.unwrap_or_else(|_| {
+                Err(PhoenixSocketError::Connect(
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "connection attempt timed out",
+                    )
+                    .into(),
+                ))
+            }))
+        }
+        _ = shutdown.changed() => None,
+    }
+}
+
 /// How long the last connection stayed joined: zero when it never got that
 /// far.
 fn uptime(joined_at: Option<Instant>) -> Duration {
@@ -668,7 +703,11 @@ async fn run_session(
         // connection that stayed up, not for one that was dropped right after
         // the handshake.
         let mut joined_at: Option<Instant> = None;
-        let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
+        let attempt = connect_bounded(&ws_url, &token, timing.connect_timeout, &mut shutdown).await;
+        let Some(attempt) = attempt else {
+            return;
+        };
+        let mut socket = match attempt {
             Ok(socket) => socket,
             Err(err) if err.is_auth_rejection() => {
                 let _ = events.send(SessionEvent::AuthRejected {
@@ -1820,6 +1859,7 @@ mod tests {
         let timing = HeartbeatTiming {
             interval: Duration::from_millis(100),
             reply_timeout: Duration::from_millis(300),
+            connect_timeout: Duration::from_secs(5),
         };
         let (handle, mut events) =
             spawn_session_timed(url, "token".to_string(), "bob".to_string(), timing);
@@ -1856,6 +1896,100 @@ mod tests {
         assert_eq!(accepted, 2);
 
         handle.shutdown();
+        server.abort();
+    }
+
+    /// A mock endpoint that accepts TCP connections and never answers the
+    /// upgrade request.
+    async fn mock_stalled_upgrade_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!(
+            "ws://{}/socket/websocket",
+            listener.local_addr().expect("address")
+        );
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_upgrade_times_out_and_reaches_the_backoff() {
+        let (url, server) = mock_stalled_upgrade_server().await;
+        let timing = HeartbeatTiming {
+            interval: Duration::from_millis(100),
+            reply_timeout: Duration::from_millis(300),
+            connect_timeout: Duration::from_millis(200),
+        };
+        let (handle, mut events) =
+            spawn_session_timed(url, "token".to_string(), "bob".to_string(), timing);
+        match next_non_frame(&mut events).await {
+            SessionEvent::Reconnecting { reason, .. } => {
+                assert!(reason.starts_with("connect failed"), "{reason}");
+                assert!(reason.contains("timed out"), "{reason}");
+            }
+            other => panic!("expected a reconnect: {other:?}"),
+        }
+        handle.shutdown();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_pending_upgrade_before_the_deadline() {
+        let (url, server) = mock_stalled_upgrade_server().await;
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let attempt = tokio::spawn(async move {
+            connect_bounded(&url, "token", Duration::from_secs(60), &mut shutdown_rx).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        shutdown_tx.send(true).expect("receiver alive");
+        let result = tokio::time::timeout(Duration::from_secs(5), attempt)
+            .await
+            .expect("the attempt stops promptly")
+            .expect("task");
+        assert!(result.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_upgrade_returns_an_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!(
+            "ws://{}/socket/websocket",
+            listener.local_addr().expect("address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        });
+        let (_tx, mut rx) = watch::channel(false);
+        let result = connect_bounded(&url, "token", Duration::from_secs(10), &mut rx)
+            .await
+            .expect("not shut down");
+        assert!(result.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_valid_upgrade_returns_a_socket() {
+        let (url, _connections, server) = mock_silent_then_answering_server().await;
+        let (_tx, mut rx) = watch::channel(false);
+        let result = connect_bounded(&url, "token", Duration::from_secs(10), &mut rx)
+            .await
+            .expect("not shut down");
+        assert!(result.is_ok());
         server.abort();
     }
 }

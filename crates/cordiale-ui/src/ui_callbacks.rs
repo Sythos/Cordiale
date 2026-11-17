@@ -580,6 +580,8 @@ pub(crate) fn register_navigation_callbacks(
         // Before the screen changes: the worker may be busy and handle the
         // command later, and a late file of this account must not open.
         crate::e2e_files::invalidate_pending_files();
+        // A link probe that is still pending must not open the viewer.
+        media_player::invalidate_links();
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
         // A preference response of the closing session must not apply.
         begin_prefs_session();
@@ -1088,7 +1090,10 @@ pub(crate) fn register_link_callbacks(
             player.set_volume(volume);
         }
     });
-    ui.on_media_closed(media_player::end);
+    ui.on_media_closed(|| {
+        media_player::invalidate_links();
+        media_player::end();
+    });
 
     ui.on_credits_link_clicked(|href| open_in_browser(&href));
 
