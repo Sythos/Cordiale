@@ -18268,6 +18268,7 @@ fn a_channel_without_a_read_cursor_has_no_baseline() {
 /// The content height of a pane with three rows, with the divider set on the
 /// row with id 2 for `divider_label` while the pane shows `pane_label`.
 fn unread_divider_pane_height(divider_label: &str, pane_label: &str, dismissed: bool) -> f32 {
+    set_headless_software_platform();
     let ui = AppWindow::new().unwrap();
     ui.set_screen("connected".into());
     ui.set_has_selected_channel(true);
@@ -18300,6 +18301,8 @@ fn the_unread_divider_adds_one_band_only_for_its_own_window() {
 
 #[test]
 fn only_a_manual_scroll_hides_the_unread_divider() {
+    use slint::platform::WindowEvent;
+    set_headless_software_platform();
     let ids: Vec<i64> = (1..=200).collect();
     let ui = AppWindow::new().unwrap();
     ui.set_screen("connected".into());
@@ -18333,6 +18336,35 @@ fn only_a_manual_scroll_hides_the_unread_divider() {
         delta_x: 0.,
         delta_y: 200.,
     });
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "");
+    assert!(ui.get_unread_divider_dismissed());
+}
+
+#[test]
+fn a_keyboard_page_hides_the_unread_divider() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_channel_label("net — #room".into());
+    let lines = chat_lines_model(&unread_rows(&(1..=200).collect::<Vec<i64>>()), true);
+    ui.set_chat_lines(Rc::new(slint::VecModel::from(lines)).into());
+    ui.set_unread_divider_label("net — #room".into());
+    ui.set_unread_divider_count(2);
+    ui.set_unread_divider_id("199".into());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1000., 700.));
+    let settle = || {
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            ui.window().take_snapshot().unwrap();
+        }
+    };
+    settle();
+    assert_eq!(ui.get_unread_divider_id(), "199");
+    ui.set_chat_page_direction(-1);
+    ui.set_chat_page_seq(ui.get_chat_page_seq() + 1);
     settle();
     assert_eq!(ui.get_unread_divider_id(), "");
     assert!(ui.get_unread_divider_dismissed());

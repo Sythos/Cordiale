@@ -1760,8 +1760,8 @@ export component AppWindow inherits Window {
     // The temporary "N unread messages" divider before the first unread row.
     // It is visual only: Rust sets the id of the first unread message, the
     // count and the window label the id belongs to; the row whose message id
-    // matches draws the line. A user scroll sets `unread-divider-dismissed`
-    // and clears the id; Rust clears the flag when another window opens.
+    // matches draws the line. A user scroll or a keyboard page sets
+    // `unread-divider-dismissed` and clears the id; Rust clears the flag when another window opens.
     in-out property <string> unread-divider-id: "";
     in-out property <string> unread-divider-label: "";
     in-out property <int> unread-divider-count: 0;
@@ -5443,9 +5443,12 @@ export component AppWindow inherits Window {
                 }
 
                 // PgUp/PgDown from the compose box: nine tenths of a screen
-                // per press, so a line of context stays in view.
+                // per press, so a line of context stays in view. A key
+                // press is a manual scroll: it hides the unread divider.
                 property <int> page-seq: chat-page-seq;
                 changed page-seq => {
+                    unread-divider-dismissed = true;
+                    unread-divider-id = "";
                     let bottom = min(0px, self.visible-height - self.content-height);
                     self.content-y = max(bottom, min(0px, self.content-y - chat-page-direction * self.visible-height * 0.9));
                     self.follow-bottom = self.content-y <= bottom + 4px;
