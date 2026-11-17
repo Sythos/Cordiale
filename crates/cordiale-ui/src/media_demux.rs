@@ -348,13 +348,21 @@ fn sample_list(stbl: &[(Fourcc, &[u8])], timescale: u32) -> Result<Vec<Sample>, 
             }
         }
     }
-    let keys: Option<Vec<usize>> = child(stbl, b"stss").map(|stss| {
-        let entries = be32(stss, 4).unwrap_or(0) as usize;
-        (0..entries)
-            .filter_map(|entry| be32(stss, 8 + 4 * entry))
-            .map(|number| number as usize)
-            .collect()
-    });
+    let keys: Option<Vec<usize>> = match child(stbl, b"stss") {
+        Some(stss) => {
+            let entries = be32(stss, 4).ok_or_else(bad)? as usize;
+            // Check the count before the loop: it must fit in the box and the limit.
+            if entries > MAX_SAMPLES || entries > stss.len().saturating_sub(8) / 4 {
+                return Err(bad());
+            }
+            let mut keys = Vec::with_capacity(entries);
+            for entry in 0..entries {
+                keys.push(be32(stss, 8 + 4 * entry).ok_or_else(bad)? as usize);
+            }
+            Some(keys)
+        }
+        None => None,
+    };
     let mut samples: Vec<Sample> = positions
         .iter()
         .enumerate()
@@ -779,6 +787,41 @@ mod tests {
             list.iter().map(|s| s.key).collect::<Vec<_>>(),
             vec![true, false, false]
         );
+    }
+
+    /// A sample table of one sample with the given sync-sample box.
+    fn table_with_stss(stss: &[u8]) -> Vec<u8> {
+        let mut stbl = Vec::new();
+        for part in [
+            full(b"stsz", &[0, 1, 10, 10]),
+            full(b"stsc", &[1, 1, 1, 1]),
+            full(b"stco", &[1, 100]),
+            full(b"stts", &[1, 1, 1000]),
+        ] {
+            stbl.extend_from_slice(&part);
+        }
+        stbl.extend_from_slice(stss);
+        stbl
+    }
+
+    #[test]
+    fn a_valid_sync_table_gives_the_key_frames() {
+        let stbl = table_with_stss(&full(b"stss", &[1, 1]));
+        let list = sample_list(&boxes(&stbl), 1000).expect("table");
+        assert_eq!(list.len(), 1);
+        assert!(list[0].key);
+    }
+
+    #[test]
+    fn a_truncated_sync_table_is_refused() {
+        let stbl = table_with_stss(&full(b"stss", &[3, 1]));
+        assert!(sample_list(&boxes(&stbl), 1000).is_err());
+    }
+
+    #[test]
+    fn a_sync_table_with_an_excessive_count_is_refused() {
+        let stbl = table_with_stss(&full(b"stss", &[u32::MAX, 1]));
+        assert!(sample_list(&boxes(&stbl), 1000).is_err());
     }
 
     #[test]
