@@ -12814,6 +12814,8 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     // A WHOIS card opens as a popup over the current view, so the chat and
     // its scroll position stay where they are.
     let popup = kind == "whois_bundle";
+    // Any avatar download that started for an earlier view is now stale.
+    WHOIS_AVATAR_EPOCH.begin_view();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<ReplyRow> = rows

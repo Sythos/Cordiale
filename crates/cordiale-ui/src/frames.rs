@@ -5534,13 +5534,41 @@ fn handle_whois_bundle(
     }
 }
 
+/// Counts the reply views shown so far. An avatar download keeps the count
+/// it started with and applies its image only while the count is unchanged.
+pub(crate) struct WhoisAvatarEpoch(std::sync::atomic::AtomicU64);
+
+impl WhoisAvatarEpoch {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(0))
+    }
+
+    /// Starts a new view: every earlier download becomes stale.
+    pub(crate) fn begin_view(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_current(&self, epoch: u64) -> bool {
+        self.current() == epoch
+    }
+}
+
+/// The epoch of the reply view that may show a WHOIS avatar.
+pub(crate) static WHOIS_AVATAR_EPOCH: WhoisAvatarEpoch = WhoisAvatarEpoch::new();
+
 /// Downloads the WHOIS avatar from Grappa and shows it on the reply
 /// screen. Slint loads images from files, so it's written to the temp
 /// directory first; a failure just leaves the card without a picture.
+/// A late result is dropped when another view opened or the card closed.
 fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_url: String) {
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
+    let epoch = WHOIS_AVATAR_EPOCH.current();
     let ui = ui.clone();
     tokio::spawn(async move {
         let fetched = client
@@ -5570,9 +5598,12 @@ fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_ur
                 }
             };
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            if let Ok(image) = slint::Image::load_from_path(&path) {
-                ui.set_reply_avatar(image);
-                ui.set_reply_avatar_visible(true);
+            let card_open = ui.get_whois_popup_open() || ui.get_screen() == "reply";
+            if card_open && WHOIS_AVATAR_EPOCH.is_current(epoch) {
+                if let Ok(image) = slint::Image::load_from_path(&path) {
+                    ui.set_reply_avatar(image);
+                    ui.set_reply_avatar_visible(true);
+                }
             }
             crate::temp_files::discard(&path);
         });

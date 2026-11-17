@@ -8689,6 +8689,30 @@ fn avatar_extension_follows_the_content_type() {
 }
 
 #[test]
+fn whois_avatar_epoch_drops_a_late_result_of_an_older_view() {
+    let epoch = WhoisAvatarEpoch::new();
+    // Alice's view starts a slow download, then Bob's view replaces it.
+    epoch.begin_view();
+    let alice = epoch.current();
+    epoch.begin_view();
+    let bob = epoch.current();
+    // Bob's download ends first and applies; Alice's ends later and is dropped.
+    assert!(epoch.is_current(bob));
+    assert!(!epoch.is_current(alice));
+}
+
+#[test]
+fn whois_avatar_epoch_keeps_the_current_result() {
+    let epoch = WhoisAvatarEpoch::new();
+    epoch.begin_view();
+    let alice = epoch.current();
+    assert!(epoch.is_current(alice));
+    // A new view (or a refresh) makes the earlier download stale.
+    epoch.begin_view();
+    assert!(!epoch.is_current(alice));
+}
+
+#[test]
 fn message_markdown_escapes_text_and_keeps_every_run() {
     let runs = vec![
         (
