@@ -13291,6 +13291,214 @@ fn catch_up_plan_pages_up_to_one_page_and_reloads_beyond_it() {
 }
 
 #[test]
+fn catch_up_retry_delay_doubles_up_to_the_cap() {
+    use std::time::Duration;
+    assert_eq!(catch_up_retry_delay(1), Duration::from_secs(1));
+    assert_eq!(catch_up_retry_delay(2), Duration::from_secs(2));
+    assert_eq!(catch_up_retry_delay(3), Duration::from_secs(4));
+    assert_eq!(catch_up_retry_delay(10), CATCH_UP_RETRY_CAP);
+    assert_eq!(catch_up_retry_delay(u32::MAX), CATCH_UP_RETRY_CAP);
+}
+
+#[test]
+fn catch_up_retries_only_temporary_errors() {
+    use cordiale_core::client::{GrappaClientError, StatusCode};
+    let rejected = |status| GrappaClientError::Rejected {
+        status,
+        code: None,
+        retry_after: None,
+    };
+    assert!(catch_up_error_is_temporary(&rejected(
+        StatusCode::SERVICE_UNAVAILABLE
+    )));
+    assert!(catch_up_error_is_temporary(&rejected(
+        StatusCode::TOO_MANY_REQUESTS
+    )));
+    assert!(!catch_up_error_is_temporary(&rejected(
+        StatusCode::FORBIDDEN
+    )));
+    assert!(!catch_up_error_is_temporary(
+        &GrappaClientError::InvalidUrl("x".to_string())
+    ));
+}
+
+const CATCH_UP_TEST_ROWS: &str = r#"[{"kind":"privmsg","sender":"bob","body":"one","id":11,"server_time":11},{"kind":"privmsg","sender":"bob","body":"two","id":12,"server_time":12}]"#;
+
+/// A REST server for the catch-up of `#rust` after message 10. The probe
+/// answers 503 `probe_fails` times (or 404 when `probe_missing`), then a gap
+/// of two; the page answers 503 `fetch_fails` times, then the two rows.
+fn catch_up_server(
+    probe_fails: usize,
+    fetch_fails: usize,
+    probe_missing: bool,
+) -> (String, Arc<RequestLog>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let probes = Arc::new(AtomicUsize::new(0));
+    let fetches = Arc::new(AtomicUsize::new(0));
+    recording_server_with(move |line| {
+        if line.contains("/messages/count") {
+            if probe_missing {
+                (404, "{}")
+            } else if probes.fetch_add(1, Ordering::SeqCst) < probe_fails {
+                (503, "{}")
+            } else {
+                (200, r#"{"count":2}"#)
+            }
+        } else if line.contains("/messages?") {
+            if fetches.fetch_add(1, Ordering::SeqCst) < fetch_fails {
+                (503, "{}")
+            } else {
+                (200, CATCH_UP_TEST_ROWS)
+            }
+        } else {
+            (404, "{}")
+        }
+    })
+}
+
+fn catch_up_row(id: i64) -> RenderedMessage {
+    RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("bob".to_string()),
+        text: format!("row {id}"),
+        italic: false,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    }
+}
+
+/// A state that holds row 10 of `#rust`, anchored there, with a session.
+/// The runtime runs the session task and stays alive for the whole test.
+fn catch_up_state(base_url: &str) -> (tokio::runtime::Runtime, WorkerState, (String, String)) {
+    let key = ("libera".to_string(), "#rust".to_string());
+    let runtime = network_test_runtime();
+    let (handle, _events) = {
+        let _guard = runtime.enter();
+        cordiale_core::session::spawn_session(
+            "ws://127.0.0.1:1/socket".to_string(),
+            "test-token".to_string(),
+            "alice".to_string(),
+        )
+    };
+    let mut state = WorkerState::new();
+    state.conn.client = Some(GrappaClient::new(base_url));
+    state.conn.token = Some("test-token".to_string());
+    state.conn.session = Some(handle);
+    state
+        .windows
+        .window_states
+        .insert(window_state_key(&key.0, &key.1), ChannelWindowState::Joined);
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), vec![catch_up_row(10)]);
+    state.transcript.catch_up_anchors.insert(key.clone(), 10);
+    (runtime, state, key)
+}
+
+fn catch_up_ids(state: &WorkerState, key: &(String, String)) -> Vec<Option<i64>> {
+    state.transcript.messages[key]
+        .iter()
+        .map(|message| message.message_id)
+        .collect()
+}
+
+/// Runs `steps` catch-up steps; returns the anchors left after each one.
+fn run_catch_up_steps(
+    runtime: &tokio::runtime::Runtime,
+    state: &mut WorkerState,
+    steps: usize,
+) -> Vec<usize> {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (worker_tx, _worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut left = Vec::new();
+    for _ in 0..steps {
+        runtime.block_on(handle_catch_up_next(state, &ui, &worker_tx));
+        left.push(state.transcript.catch_up_anchors.len());
+    }
+    left
+}
+
+#[test]
+fn catch_up_keeps_the_anchor_after_a_temporary_probe_error_and_fills_the_gap() {
+    let (url, _log) = catch_up_server(1, 0, false);
+    let (runtime, mut state, key) = catch_up_state(&url);
+    let left = run_catch_up_steps(&runtime, &mut state, 1);
+    assert_eq!(left, vec![1]);
+    assert_eq!(state.transcript.catch_up_attempts.get(&key), Some(&1));
+    assert_eq!(catch_up_ids(&state, &key), vec![Some(10)]);
+
+    let left = run_catch_up_steps(&runtime, &mut state, 1);
+    assert_eq!(left, vec![0]);
+    assert!(state.transcript.catch_up_attempts.is_empty());
+    assert_eq!(
+        catch_up_ids(&state, &key),
+        vec![Some(10), Some(11), Some(12)]
+    );
+}
+
+#[test]
+fn catch_up_keeps_the_anchor_after_a_temporary_fetch_error_and_adds_each_row_once() {
+    let (url, _log) = catch_up_server(0, 1, false);
+    let (runtime, mut state, key) = catch_up_state(&url);
+    assert_eq!(run_catch_up_steps(&runtime, &mut state, 1), vec![1]);
+    assert_eq!(state.transcript.catch_up_anchors.get(&key), Some(&10));
+    // A live row arrives between the two tries; the anchor stays at 10.
+    state
+        .transcript
+        .messages
+        .get_mut(&key)
+        .unwrap()
+        .push(catch_up_row(13));
+
+    assert_eq!(run_catch_up_steps(&runtime, &mut state, 1), vec![0]);
+    assert_eq!(
+        catch_up_ids(&state, &key),
+        vec![Some(10), Some(11), Some(12), Some(13)]
+    );
+}
+
+#[test]
+fn catch_up_stops_after_the_retry_limit() {
+    let (url, log) = catch_up_server(usize::MAX, 0, false);
+    let (runtime, mut state, key) = catch_up_state(&url);
+    let steps = CATCH_UP_MAX_ATTEMPTS as usize;
+    let left = run_catch_up_steps(&runtime, &mut state, steps);
+    assert_eq!(left.last(), Some(&0));
+    assert!(left[..steps - 1].iter().all(|count| *count == 1));
+    assert!(state.transcript.catch_up_attempts.is_empty());
+    assert_eq!(log.lock().expect("log").len(), steps);
+    assert_eq!(catch_up_ids(&state, &key), vec![Some(10)]);
+}
+
+#[test]
+fn catch_up_does_not_retry_a_channel_that_is_no_longer_joined() {
+    let (url, _log) = catch_up_server(usize::MAX, 0, false);
+    let (runtime, mut state, key) = catch_up_state(&url);
+    state
+        .windows
+        .window_states
+        .insert(window_state_key(&key.0, &key.1), ChannelWindowState::Kicked);
+    assert_eq!(run_catch_up_steps(&runtime, &mut state, 1), vec![0]);
+    assert!(state.transcript.catch_up_attempts.is_empty());
+}
+
+#[test]
+fn catch_up_without_a_probe_still_pages_forward_without_a_retry() {
+    let (url, _log) = catch_up_server(0, 0, true);
+    let (runtime, mut state, key) = catch_up_state(&url);
+    assert_eq!(run_catch_up_steps(&runtime, &mut state, 1), vec![0]);
+    assert!(state.transcript.catch_up_attempts.is_empty());
+    assert_eq!(
+        catch_up_ids(&state, &key),
+        vec![Some(10), Some(11), Some(12)]
+    );
+}
+
+#[test]
 fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
     let line = |id| RenderedMessage {
         timestamp: "10:00".to_string(),

@@ -436,8 +436,41 @@ pub(crate) fn note_catch_up_anchors(state: &mut WorkerState) {
     }
 }
 
+/// Whether a REST error may go away by itself: no answer at all, a timeout,
+/// a rate limit or a server-side failure. Other refusals will repeat.
+pub(crate) fn catch_up_error_is_temporary(
+    error: &cordiale_core::client::GrappaClientError,
+) -> bool {
+    use cordiale_core::client::StatusCode;
+    let temporary_status = |status: StatusCode| {
+        status.is_server_error()
+            || status == StatusCode::TOO_MANY_REQUESTS
+            || status == StatusCode::REQUEST_TIMEOUT
+    };
+    match error {
+        cordiale_core::client::GrappaClientError::Http(inner) => {
+            inner.status().is_none_or(temporary_status)
+        }
+        cordiale_core::client::GrappaClientError::Rejected { status, .. } => {
+            temporary_status(*status)
+        }
+        _ => false,
+    }
+}
+
+/// Wait before retry number `attempt` (1 for the first retry): the base wait
+/// doubles each time, up to the cap.
+pub(crate) fn catch_up_retry_delay(attempt: u32) -> std::time::Duration {
+    let doublings = attempt.saturating_sub(1).min(16);
+    CATCH_UP_RETRY_BASE
+        .saturating_mul(1u32 << doublings)
+        .min(CATCH_UP_RETRY_CAP)
+}
+
 /// Backfills the next queued channel, then schedules the one after it: the
-/// requests go out one at a time and spaced out, never as a burst.
+/// requests go out one at a time and spaced out, never as a burst. A
+/// temporary REST error puts the anchor back and delays the next step, up
+/// to `CATCH_UP_MAX_ATTEMPTS` tries for the channel.
 pub(crate) async fn handle_catch_up_next(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -445,16 +478,52 @@ pub(crate) async fn handle_catch_up_next(
 ) {
     if state.conn.session.is_none() {
         state.transcript.catch_up_anchors.clear();
+        state.transcript.catch_up_attempts.clear();
         return;
     }
     let Some((key, anchor)) = state.transcript.catch_up_anchors.pop_first() else {
         return;
     };
-    catch_up_channel(state, ui, &key, anchor).await;
+    let mut delay = CATCH_UP_PACING;
+    if catch_up_channel(state, ui, &key, anchor).await {
+        let attempts = state
+            .transcript
+            .catch_up_attempts
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        let still_wanted = state.conn.session.is_some()
+            && state
+                .windows
+                .window_states
+                .get(&window_state_key(&key.0, &key.1))
+                == Some(&ChannelWindowState::Joined);
+        if attempts < CATCH_UP_MAX_ATTEMPTS && still_wanted {
+            state
+                .transcript
+                .catch_up_attempts
+                .insert(key.clone(), attempts);
+            state
+                .transcript
+                .catch_up_anchors
+                .entry(key)
+                .or_insert(anchor);
+            delay = catch_up_retry_delay(attempts);
+        } else {
+            persistence::log_line(&format!(
+                "catch-up for {}/{} stopped after {attempts} tries",
+                key.0, key.1
+            ));
+            state.transcript.catch_up_attempts.remove(&key);
+        }
+    } else {
+        state.transcript.catch_up_attempts.remove(&key);
+    }
     if !state.transcript.catch_up_anchors.is_empty() {
         let next = worker_self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(CATCH_UP_PACING).await;
+            tokio::time::sleep(delay).await;
             let _ = next.send(WorkerCommand::CatchUpNext);
         });
     }
@@ -464,14 +533,15 @@ pub(crate) async fn handle_catch_up_next(
 /// down. A gap of up to one page is read with `?after=`; a bigger one
 /// replaces the window with the newest page and leaves a note where the
 /// hole is, which scrolling up fills, like Cicchetto's far-behind reload.
+/// Returns `true` when a temporary REST error means the anchor must stay.
 async fn catch_up_channel(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     key: &(String, String),
     anchor: i64,
-) {
+) -> bool {
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
-        return;
+        return false;
     };
     let plan = match client
         .fetch_messages_count(&token, &key.0, &key.1, anchor, Some(CATCH_UP_PROBE_CAP))
@@ -487,11 +557,11 @@ async fn catch_up_channel(
                 "catch-up probe failed for {}/{}: {error:?}",
                 key.0, key.1
             ));
-            return;
+            return catch_up_error_is_temporary(&error);
         }
     };
     let rows = match plan {
-        CatchUpPlan::Nothing => return,
+        CatchUpPlan::Nothing => return false,
         CatchUpPlan::PageForward => {
             client
                 .fetch_messages(&token, &key.0, &key.1, Some(anchor), Some(CATCH_UP_PAGE))
@@ -510,7 +580,7 @@ async fn catch_up_channel(
                 "catch-up fetch failed for {}/{}: {error:?}",
                 key.0, key.1
             ));
-            return;
+            return catch_up_error_is_temporary(&error);
         }
     };
     // The awaits above can outlast the session or the channel membership.
@@ -521,11 +591,11 @@ async fn catch_up_channel(
             .get(&window_state_key(&key.0, &key.1))
             != Some(&ChannelWindowState::Joined)
     {
-        return;
+        return false;
     }
     let incoming: Vec<RenderedMessage> = rows.iter().map(render_history_entry).collect();
     if incoming.is_empty() {
-        return;
+        return false;
     }
     let messages = state.transcript.messages.entry(key.clone()).or_default();
     if plan == CatchUpPlan::ReloadTail {
@@ -544,6 +614,7 @@ async fn catch_up_channel(
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_start_reached(false));
         }
     }
+    false
 }
 
 /// Swaps a window's rows for the newest page, keeping the rows that came
