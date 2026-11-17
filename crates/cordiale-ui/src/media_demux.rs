@@ -296,23 +296,41 @@ fn sample_list(stbl: &[(Fourcc, &[u8])], timescale: u32) -> Result<Vec<Sample>, 
     let offsets = chunk_offsets(stbl)?;
     let stsc = child(stbl, b"stsc").ok_or_else(bad)?;
     let runs = be32(stsc, 4).ok_or_else(bad)? as usize;
-    let mut positions = Vec::with_capacity(count);
+    // Check the whole run table before any chunk scan: the runs must fit in
+    // the box, and `first_chunk` must start at 1 or more, grow strictly and
+    // stay inside the chunk table. Then the run ranges cannot overlap and the
+    // total work stays bounded by the chunk count.
+    if runs > MAX_SAMPLES || runs > stsc.len().saturating_sub(8) / 12 {
+        return Err(bad());
+    }
+    let mut previous = 0usize;
     for run in 0..runs {
+        let first = be32(stsc, 8 + 12 * run).ok_or_else(bad)? as usize;
+        if first <= previous || first > offsets.len() {
+            return Err(bad());
+        }
+        previous = first;
+    }
+    let mut positions = Vec::with_capacity(count);
+    'runs: for run in 0..runs {
         let first = be32(stsc, 8 + 12 * run).ok_or_else(bad)? as usize;
         let per_chunk = be32(stsc, 12 + 12 * run).ok_or_else(bad)? as usize;
         let end = match be32(stsc, 8 + 12 * (run + 1)) {
             Some(next) if run + 1 < runs => next as usize,
             _ => offsets.len() + 1,
         };
-        for chunk in first.max(1)..end.min(offsets.len() + 1) {
+        for chunk in first..end {
             let mut at = offsets[chunk - 1];
             for _ in 0..per_chunk {
                 if positions.len() >= count {
-                    break;
+                    break 'runs;
                 }
                 let size = sizes[positions.len()];
                 positions.push((at, size));
                 at = at.checked_add(size).ok_or_else(bad)?;
+            }
+            if positions.len() >= count {
+                break 'runs;
             }
         }
     }
@@ -821,6 +839,47 @@ mod tests {
     #[test]
     fn a_sync_table_with_an_excessive_count_is_refused() {
         let stbl = table_with_stss(&full(b"stss", &[u32::MAX, 1]));
+        assert!(sample_list(&boxes(&stbl), 1000).is_err());
+    }
+
+    /// A table of two samples in two chunks with the given chunk-run words.
+    fn table_with_runs(runs: &[u32]) -> Vec<u8> {
+        let mut stbl = Vec::new();
+        for part in [
+            full(b"stsz", &[0, 2, 10, 10, 10]),
+            full(b"stsc", runs),
+            full(b"stco", &[2, 100, 200]),
+            full(b"stts", &[1, 2, 1000]),
+        ] {
+            stbl.extend_from_slice(&part);
+        }
+        stbl
+    }
+
+    #[test]
+    fn a_valid_run_table_maps_the_chunks() {
+        let stbl = table_with_runs(&[2, 1, 1, 1, 2, 1, 1]);
+        let list = sample_list(&boxes(&stbl), 1000).expect("table");
+        assert_eq!((list[0].offset, list[1].offset), (100, 200));
+    }
+
+    #[test]
+    fn invalid_first_chunk_values_are_refused() {
+        // Decreasing, repeated, zero and out of range.
+        for runs in [
+            [2, 2, 1, 1, 1, 1, 1],
+            [2, 1, 1, 1, 1, 1, 1],
+            [2, 0, 1, 1, 1, 1, 1],
+            [2, 1, 1, 1, 3, 1, 1],
+        ] {
+            let stbl = table_with_runs(&runs);
+            assert!(sample_list(&boxes(&stbl), 1000).is_err(), "{runs:?}");
+        }
+    }
+
+    #[test]
+    fn a_run_count_larger_than_the_box_is_refused() {
+        let stbl = table_with_runs(&[u32::MAX, 1, 1, 1]);
         assert!(sample_list(&boxes(&stbl), 1000).is_err());
     }
 
