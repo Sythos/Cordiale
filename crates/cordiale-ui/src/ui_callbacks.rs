@@ -102,9 +102,9 @@ pub(crate) fn register_radio_callbacks(
     });
 
     ui.on_font_size_changed(move |percent| {
-        let mut settings = persistence::load_settings().unwrap_or_default();
-        settings.font_size_percent = u8::try_from(percent.clamp(50, 150)).unwrap_or(100);
-        let _ = persistence::save_settings(&settings);
+        let _ = persistence::update_settings(|settings| {
+            settings.font_size_percent = u8::try_from(percent.clamp(50, 150)).unwrap_or(100);
+        });
     });
 
     let tx_for_ban_type = worker_tx.clone();
@@ -171,9 +171,7 @@ pub(crate) fn register_connect_callbacks(
     let weak_for_language = ui.as_weak();
     ui.on_language_selected(move |code| {
         if let Some(language) = language_from_code(&code) {
-            let mut settings = persistence::load_settings().unwrap_or_default();
-            settings.language = Some(language);
-            let _ = persistence::save_settings(&settings);
+            let _ = persistence::update_settings(|settings| settings.language = Some(language));
             let _ = slint::select_bundled_translation(language_code(language));
             dates::set_language(Some(language));
         }
