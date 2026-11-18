@@ -674,11 +674,20 @@ impl AudioStats {
             .fold(0.0, |peak: f32, sample| peak.max(sample.abs()));
         self.samples
             .fetch_add(samples.len() as u64, Ordering::Relaxed);
-        let _ = self
-            .peak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
-                (peak > f32::from_bits(bits)).then_some(peak.to_bits())
-            });
+        // A compare-and-swap loop: the largest value wins. `fetch_update` is
+        // deprecated in the newest standard library and renamed there.
+        let mut current = self.peak.load(Ordering::Relaxed);
+        while peak > f32::from_bits(current) {
+            match self.peak.compare_exchange_weak(
+                current,
+                peak.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     fn peak(&self) -> f32 {
