@@ -3196,9 +3196,10 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
     settle_engine(state, ui, &row.network, engine).await;
     // Only a new text of a peer sounds: not a copy of an own text, a
     // repeated row, a KEYS row or a list message. The text stays in the
-    // engine, so the sound reads no mention from it.
+    // engine, so the sound reads no mention from it. The key is the key of
+    // the locked window: the selection and mute checks use it.
     if stored && !row.own && row.channel.is_none() {
-        let key = (row.network.clone(), row.from.clone());
+        let key = LocalQuery::new(&row.network, QueryLane::Locked, &row.from).key();
         play_sound_for_sender(state, &key, &row.from, "", true);
     }
     if keys_read {
