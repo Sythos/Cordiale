@@ -1591,6 +1591,16 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
     Ok(source)
 }
 
+/// Decodes a short clip that the program carries, for the notification
+/// sounds. The error text is for the log: it holds no user data.
+pub(crate) fn clip_source(
+    bytes: &'static [u8],
+    extension: &str,
+) -> Result<impl Source<Item = Sample>, String> {
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    symphonia_source(&bytes, extension).map_err(|err| err.describe())
+}
+
 /// The sound of an MP4 file, read by symphonia 0.5: the AAC-LC layer of an
 /// HE-AAC track plays here, where 0.6 refuses the track.
 fn symphonia05_source(bytes: &Arc<[u8]>) -> Result<AudioSource, AudioOpenError> {

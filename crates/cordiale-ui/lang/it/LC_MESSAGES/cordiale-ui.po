@@ -4262,3 +4262,55 @@ msgstr "Non è stato possibile aprire il suono di questo video. L'immagine viene
 msgctxt "AppWindow"
 msgid "This video has sound that Cordiale cannot play ({}). The picture plays without sound."
 msgstr "Questo video ha un suono che Cordiale non può riprodurre ({}). L'immagine viene riprodotta senza suono."
+
+msgctxt "AppWindow"
+msgid "Sounds on this computer"
+msgstr "Suoni su questo computer"
+
+msgctxt "AppWindow"
+msgid "Cordiale plays one of these sounds on this computer when a direct message or a mention arrives in a window that you do not look at. These choices stay on this computer and do not change the setting above."
+msgstr "Cordiale riproduce uno di questi suoni su questo computer quando arriva un messaggio diretto o una menzione in una finestra che non stai guardando. Queste scelte restano su questo computer e non cambiano l'impostazione qui sopra."
+
+msgctxt "AppWindow"
+msgid "Direct message sound"
+msgstr "Suono dei messaggi diretti"
+
+msgctxt "AppWindow"
+msgid "Mention sound"
+msgstr "Suono delle menzioni"
+
+msgctxt "AppWindow"
+msgid "None"
+msgstr "Nessuno"
+
+msgctxt "AppWindow"
+msgid "Kalimba"
+msgstr "Kalimba"
+
+msgctxt "AppWindow"
+msgid "Bell"
+msgstr "Campana"
+
+msgctxt "AppWindow"
+msgid "Alert"
+msgstr "Allarme"
+
+msgctxt "AppWindow"
+msgid "Dum"
+msgstr "Dum"
+
+msgctxt "AppWindow"
+msgid "Deep bell"
+msgstr "Campana grave"
+
+msgctxt "AppWindow"
+msgid "Preview"
+msgstr "Anteprima"
+
+msgctxt "AppWindow"
+msgid "Volume of these sounds: {}%"
+msgstr "Volume di questi suoni: {}%"
+
+msgctxt "AppWindow"
+msgid "Volume of these sounds"
+msgstr "Volume di questi suoni"

@@ -1661,6 +1661,37 @@ pub(crate) fn register_notification_callbacks(
         }
     });
 
+    // Sounds on this computer: stored in the local settings, never on Grappa.
+    let weak_for_local_sounds = ui.as_weak();
+    ui.on_local_sounds_changed(move || {
+        let Some(ui) = weak_for_local_sounds.upgrade() else {
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.sound_direct =
+            notification_sound::choice_key(ui.get_local_sound_direct_index()).to_string();
+        settings.sound_mention =
+            notification_sound::choice_key(ui.get_local_sound_mention_index()).to_string();
+        settings.sound_volume = u8::try_from(ui.get_local_sound_volume().clamp(0, 100))
+            .unwrap_or(settings.sound_volume);
+        let _ = persistence::save_settings(&settings);
+        notification_sound::configure(
+            &settings.sound_direct,
+            &settings.sound_mention,
+            settings.sound_volume,
+        );
+    });
+
+    // The preview button plays the chosen sound; 0 is the direct message
+    // list and 1 the mention list.
+    ui.on_local_sound_preview(move |list| {
+        notification_sound::preview(if list == 0 {
+            notification_sound::EventKind::DirectMessage
+        } else {
+            notification_sound::EventKind::Mention
+        });
+    });
+
     let tx_for_mute_current = worker_tx.clone();
     ui.on_mute_current_requested(move |seconds| {
         let _ = tx_for_mute_current.send(WorkerCommand::MuteCurrentWindow(seconds));
