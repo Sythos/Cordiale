@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn gate_ignores_a_value_that_keeps_changing() {
         let mut gate = SaveGate::new(None);
-        for width in 400..420 {
+        for width in MIN_WINDOW_WIDTH..MIN_WINDOW_WIDTH + 20 {
             let mut resizing = sample(false, false);
             resizing.size = (width, 700);
             assert!(!gate.observe(record(None, &resizing)));
