@@ -142,6 +142,18 @@ pub struct Settings {
     /// Grappa.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_output: Option<String>,
+    /// Notification sound for a direct message: the id of a bundled sound,
+    /// or `"none"`. An id that this version does not know counts as `"none"`.
+    /// Kept on this device only, never sent to Grappa.
+    #[serde(default = "default_sound_choice")]
+    pub sound_direct: String,
+    /// Notification sound for a mention (same values as `sound_direct`).
+    #[serde(default = "default_sound_choice")]
+    pub sound_mention: String,
+    /// Volume of the notification sounds, 0 to 100. Separate from the radio
+    /// and media volumes.
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume: u8,
     /// Window geometry and divider widths from the last run. Kept on this
     /// device only, never sent to Grappa. An unreadable value is dropped
     /// without touching any other setting.
@@ -205,6 +217,14 @@ fn default_radio_volume() -> u8 {
     80
 }
 
+fn default_sound_choice() -> String {
+    "none".to_string()
+}
+
+fn default_sound_volume() -> u8 {
+    60
+}
+
 fn default_font_size_percent() -> u8 {
     100
 }
@@ -234,6 +254,9 @@ impl Default for Settings {
             mute_since: BTreeMap::new(),
             shrink_videos: false,
             audio_output: None,
+            sound_direct: default_sound_choice(),
+            sound_mention: default_sound_choice(),
+            sound_volume: default_sound_volume(),
             window: None,
         }
     }
@@ -1156,6 +1179,9 @@ mod tests {
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
             shrink_videos: true,
             audio_output: Some("alsa:default".to_string()),
+            sound_direct: "kalimba".to_string(),
+            sound_mention: "alert".to_string(),
+            sound_volume: 35,
             window: Some(WindowState {
                 width: Some(1000),
                 height: Some(700),
@@ -1172,6 +1198,15 @@ mod tests {
         let decoded: Settings = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(settings, decoded);
+    }
+
+    #[test]
+    fn settings_without_sound_values_stay_silent_at_sixty_percent() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"language":"it","theme":"dark"}"#).expect("deserialize");
+        assert_eq!(decoded.sound_direct, "none");
+        assert_eq!(decoded.sound_mention, "none");
+        assert_eq!(decoded.sound_volume, 60);
     }
 
     #[test]
