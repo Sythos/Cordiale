@@ -47,6 +47,8 @@ mod input_history;
 mod key_prompt;
 mod layout_trace;
 mod link_hover;
+mod media_audio_error;
+mod media_audio_v05;
 mod media_demux;
 #[cfg(test)]
 mod media_fixtures;
@@ -10915,6 +10917,8 @@ fn link_refused(ui: &slint::Weak<AppWindow>, refusal: cordiale_core::media::Link
         ui.set_media_title("".into());
         ui.set_media_error(reason.into());
         ui.set_media_kind("failed".into());
+        ui.set_media_audio_note("".into());
+        ui.set_media_audio_note_detail("".into());
         ui.set_media_zoom(false);
         ui.set_media_open(true);
     });
@@ -11020,6 +11024,8 @@ async fn show_media(
         ui.set_media_url(url.into());
         ui.set_media_title(title.into());
         ui.set_media_kind("loading".into());
+        ui.set_media_audio_note("".into());
+        ui.set_media_audio_note_detail("".into());
         ui.set_media_saveable(false);
         ui.set_media_playing(false);
         ui.set_media_zoom(false);
