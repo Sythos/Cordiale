@@ -14365,3 +14365,5 @@ fn stale_guest_bearer(error: &BootstrapError) -> bool {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod translation_tests;
