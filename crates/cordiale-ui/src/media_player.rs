@@ -15,7 +15,8 @@
 
 use std::collections::VecDeque;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -23,9 +24,9 @@ use std::time::{Duration, Instant};
 
 use opus_decoder::OpusDecoder;
 use rodio::{ChannelCount, Sample, SampleRate, Source};
-use symphonia::core::codecs::audio::well_known::{CODEC_ID_OPUS, CODEC_ID_VORBIS};
+use symphonia::core::codecs::audio::well_known::{self, CODEC_ID_OPUS, CODEC_ID_VORBIS};
 use symphonia::core::codecs::audio::{
-    AudioCodecParameters, AudioDecoder as SymphoniaDecoder, AudioDecoderOptions,
+    AudioCodecId, AudioCodecParameters, AudioDecoder as SymphoniaDecoder, AudioDecoderOptions,
     CODEC_ID_NULL_AUDIO,
 };
 use symphonia::core::codecs::CodecParameters;
@@ -37,6 +38,8 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration as MediaDuration, Time, Timestamp};
 
+use crate::media_audio_error::{AudioNote, AudioOpenError, OpenStage, TrackInfo, CODEC_AAC};
+use crate::media_audio_v05::{self, Decoder05, Packets05};
 use crate::media_demux::{self, Sample as VideoSample, VideoCodec, VideoTrack};
 use crate::media_hw::{self, HardwareDecode};
 use crate::AppWindow;
@@ -80,6 +83,8 @@ pub enum MediaEvent {
     Failed(String),
     /// The new output did not open: the sound goes on the old output.
     OutputNotMoved(String),
+    /// The sound of the file cannot play: the viewer tells the user why.
+    AudioNote(AudioNote),
 }
 
 enum Command {
@@ -174,7 +179,7 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                 // device (a headset, a monitor) gets the sound.
                 device = None;
                 ensure_device(&mut device);
-                match Session::open(bytes, &extension, generation, volume, device.as_ref()) {
+                match Session::open_noted(bytes, &extension, generation, volume, device.as_ref()) {
                     Ok(opened) => {
                         on_event(
                             generation,
@@ -183,9 +188,26 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
                                 has_video: opened.video.is_some(),
                             },
                         );
+                        if let Some(note) = opened.audio_note.clone() {
+                            on_event(generation, MediaEvent::AudioNote(note));
+                        }
                         session = Some(opened);
                     }
-                    Err(reason) => on_event(generation, MediaEvent::Failed(reason)),
+                    Err(OpenError::Audio(err)) => {
+                        if audio_error_is_loggable(&err) {
+                            cordiale_core::persistence::log_line(&format!(
+                                "audio file could not be opened: {}",
+                                err.describe()
+                            ));
+                        }
+                        if let Some(note) = err.note() {
+                            on_event(generation, MediaEvent::AudioNote(note));
+                        }
+                        on_event(generation, MediaEvent::Failed(err.describe()));
+                    }
+                    Err(OpenError::Text(reason)) => {
+                        on_event(generation, MediaEvent::Failed(reason))
+                    }
                 }
             }
             Ok(Command::Play) => {
@@ -265,10 +287,8 @@ fn ensure_device(device: &mut Option<rodio::MixerDeviceSink>) {
     }
     match crate::audio_output::open_selected_sink() {
         Ok(sink) => {
+            crate::audio_output::log_opened(&sink);
             *device = Some(sink);
-            cordiale_core::persistence::log_line(&audio_output_line(
-                crate::debug_info::default_audio_output().as_deref(),
-            ));
         }
         Err(err) => cordiale_core::persistence::log_line(&format!("no audio output: {err}")),
     }
@@ -319,6 +339,8 @@ struct Session {
     audio_stats: Option<Arc<AudioStats>>,
     /// What the sound did at the start: one of the `AUDIO_*` words.
     audio_state: &'static str,
+    /// What the viewer says about a sound that cannot play.
+    audio_note: Option<AudioNote>,
     /// The sound still plays and is the clock. When it ends before the
     /// video, the wall clock goes on from `audio_at`.
     audio_live: bool,
@@ -332,6 +354,28 @@ struct Session {
     last_report: Instant,
 }
 
+/// Why a file did not open.
+enum OpenError {
+    /// The sound of an audio file could not be opened.
+    Audio(Box<AudioOpenError>),
+    Text(String),
+}
+
+impl From<String> for OpenError {
+    fn from(reason: String) -> Self {
+        Self::Text(reason)
+    }
+}
+
+impl OpenError {
+    fn into_text(self) -> String {
+        match self {
+            Self::Audio(err) => err.describe(),
+            Self::Text(reason) => reason,
+        }
+    }
+}
+
 impl Session {
     fn open(
         bytes: Arc<[u8]>,
@@ -340,12 +384,28 @@ impl Session {
         volume: f32,
         device: Option<&rodio::MixerDeviceSink>,
     ) -> Result<Self, String> {
-        let (audio_source, video) = if matches!(extension, "mp4" | "mov" | "m4v" | "webm") {
-            let (video, audio_source) = open_video(&bytes, extension)?;
-            (audio_source, Some(video))
-        } else {
-            (Some(symphonia_source(&bytes, extension)?), None)
-        };
+        Self::open_noted(bytes, extension, generation, volume, device).map_err(OpenError::into_text)
+    }
+
+    /// Like [`Session::open`], but an audio file that fails gives its typed
+    /// error, so the viewer can say why.
+    fn open_noted(
+        bytes: Arc<[u8]>,
+        extension: &str,
+        generation: u64,
+        volume: f32,
+        device: Option<&rodio::MixerDeviceSink>,
+    ) -> Result<Self, OpenError> {
+        let (audio_source, video, audio_error) =
+            if matches!(extension, "mp4" | "mov" | "m4v" | "webm") {
+                let (video, audio_source, audio_error) = open_video(&bytes, extension)?;
+                (audio_source, Some(video), audio_error)
+            } else {
+                match audio_source(&bytes, extension) {
+                    Ok(source) => (Some(source), None, None),
+                    Err(err) => return Err(OpenError::Audio(Box::new(err))),
+                }
+            };
         let mut duration = audio_source
             .as_ref()
             .and_then(|source| source.total_duration())
@@ -368,8 +428,8 @@ impl Session {
                 player.append(buffered);
                 Some(player)
             }
-            (None, _) if video.is_none() => return Err("no audio track".to_string()),
-            (Some(_), None) if video.is_none() => return Err("no audio output".to_string()),
+            (None, _) if video.is_none() => return Err("no audio track".to_string().into()),
+            (Some(_), None) if video.is_none() => return Err("no audio output".to_string().into()),
             (Some(_), None) => {
                 cordiale_core::persistence::log_line(
                     "video has a sound, but no audio output is open: it plays without sound",
@@ -377,6 +437,11 @@ impl Session {
                 None
             }
             _ => None,
+        };
+        let audio_note = if video.is_some() && audio_state == AUDIO_NO_OUTPUT {
+            Some(AudioNote::no_output())
+        } else {
+            audio_error.as_ref().and_then(AudioOpenError::note)
         };
         let mut clock = WallClock {
             base: 0.0,
@@ -392,6 +457,7 @@ impl Session {
             audio,
             audio_stats,
             audio_state,
+            audio_note,
             video,
             clock,
             paused: false,
@@ -576,19 +642,73 @@ impl VideoStats {
     }
 }
 
-/// Counters of the audio output. The output thread and the controller share them.
+/// Counters of the audio output. The output thread, the decode worker and
+/// the controller share them.
 #[derive(Default)]
 struct AudioStats {
     /// Times when the output found the decoded queue empty and had to wait.
     underruns: AtomicU64,
+    /// The reader that decodes the sound: `main` or `fallback`.
+    path: &'static str,
+    /// The largest absolute sample that the decoder made, before the gain,
+    /// as the bits of an `f32`.
+    peak: AtomicU32,
+    /// How many samples the decoder made.
+    samples: AtomicU64,
+    /// Why the sound ended before the end of the stream, if it did.
+    end: Mutex<Option<String>>,
 }
 
-/// The log line for the audio output that the player opened.
-fn audio_output_line(device: Option<&str>) -> String {
-    format!(
-        "audio output opened: {}",
-        device.unwrap_or("default device (name not available)")
-    )
+impl AudioStats {
+    fn with_path(path: &'static str) -> Self {
+        Self {
+            path,
+            ..Self::default()
+        }
+    }
+
+    /// Counts the samples of one decoded chunk and keeps the largest one.
+    fn record_samples(&self, samples: &[Sample]) {
+        let peak = samples
+            .iter()
+            .fold(0.0, |peak: f32, sample| peak.max(sample.abs()));
+        self.samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        // A compare-and-swap loop: the largest value wins. `fetch_update` is
+        // deprecated in the newest standard library and renamed there.
+        let mut current = self.peak.load(Ordering::Relaxed);
+        while peak > f32::from_bits(current) {
+            match self.peak.compare_exchange_weak(
+                current,
+                peak.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn peak(&self) -> f32 {
+        f32::from_bits(self.peak.load(Ordering::Relaxed))
+    }
+
+    /// Notes that the sound ended on an error. Only the first one counts,
+    /// and only that one goes to the log.
+    fn record_end(&self, reason: &str) {
+        let Ok(mut end) = self.end.lock() else {
+            return;
+        };
+        if end.is_none() {
+            cordiale_core::persistence::log_line(&format!("audio ended early: {reason}"));
+            *end = Some(reason.to_string());
+        }
+    }
+
+    fn end_reason(&self) -> Option<String> {
+        self.end.lock().ok().and_then(|end| end.clone())
+    }
 }
 
 /// The file has a sound and it plays on the open output.
@@ -601,7 +721,7 @@ const AUDIO_NO_TRACK: &str = "no_track";
 /// The line for the log.
 fn playback_summary(
     video: Option<&VideoStats>,
-    underruns: Option<u64>,
+    audio: Option<&AudioStats>,
     audio_state: &str,
 ) -> String {
     let mut line = format!("media playback: audio={audio_state}");
@@ -623,25 +743,27 @@ fn playback_summary(
             video.convert_max.as_secs_f64() * 1000.0,
         ));
     }
-    if let Some(underruns) = underruns {
-        line.push_str(&format!(" audio_underruns={underruns}"));
+    if let Some(audio) = audio {
+        line.push_str(&format!(
+            " audio_underruns={} audio_path={} audio_peak={:.3} audio_samples={}",
+            audio.underruns.load(Ordering::Relaxed),
+            audio.path,
+            audio.peak(),
+            audio.samples.load(Ordering::Relaxed),
+        ));
+        if let Some(reason) = audio.end_reason() {
+            line.push_str(&format!(" audio_end={reason}"));
+        }
     }
     line
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let underruns = self
-            .audio_stats
-            .as_ref()
-            .map(|stats| stats.underruns.load(Ordering::Relaxed));
+        let audio = self.audio_stats.as_deref();
         let video = self.video.as_ref().map(|video| &video.stats);
-        if video.is_some() || underruns.is_some() {
-            cordiale_core::persistence::log_line(&playback_summary(
-                video,
-                underruns,
-                self.audio_state,
-            ));
+        if video.is_some() || audio.is_some() {
+            cordiale_core::persistence::log_line(&playback_summary(video, audio, self.audio_state));
         }
     }
 }
@@ -752,6 +874,14 @@ fn apply(ui: &AppWindow, generation: u64, event: MediaEvent) {
             ui.set_media_time(clock_label(0.0, duration).into());
             ui.set_media_playing(true);
             ui.set_media_kind(if has_video { "video" } else { "audio" }.into());
+            // An earlier file's note must not stay; a note for this file
+            // comes in its own event.
+            ui.set_media_audio_note("".into());
+            ui.set_media_audio_note_detail("".into());
+        }
+        MediaEvent::AudioNote(note) => {
+            ui.set_media_audio_note(note.key.into());
+            ui.set_media_audio_note_detail(note.detail.into());
         }
         MediaEvent::Position(seconds) => {
             ui.set_media_position(seconds as f32);
@@ -819,6 +949,8 @@ enum Packets {
         list: Vec<(usize, usize, i64)>,
         next: usize,
     },
+    /// The packets of an MP4 track, read by the fallback reader.
+    V05(Packets05),
 }
 
 struct Pcm {
@@ -830,32 +962,53 @@ struct Pcm {
 }
 
 impl Packets {
-    fn next(&mut self) -> Option<Pcm> {
+    /// The next packet; `Ok(None)` at the end of the stream, and the message
+    /// of the reader when it fails.
+    fn next(&mut self) -> Result<Option<Pcm>, String> {
         match self {
             Packets::Format { reader, track_id } => loop {
-                let packet = reader.next_packet().ok()??;
+                let packet = match reader.next_packet() {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => return Ok(None),
+                    Err(err) => return Err(err.to_string()),
+                };
                 if packet.track_id == *track_id {
-                    return Some(Pcm {
+                    return Ok(Some(Pcm {
                         data: packet.data.into_vec(),
                         ts: packet.pts,
                         dur: packet.dur,
                         trim_start: packet.trim_start,
                         trim_end: packet.trim_end,
-                    });
+                    }));
                 }
             },
             Packets::List { bytes, list, next } => {
-                let (offset, size, us) = *list.get(*next)?;
+                let Some(&(offset, size, us)) = list.get(*next) else {
+                    return Ok(None);
+                };
                 *next += 1;
-                let data = bytes.get(offset..offset.checked_add(size)?)?.to_vec();
-                Some(Pcm {
-                    data,
+                let Some(data) = offset
+                    .checked_add(size)
+                    .and_then(|end| bytes.get(offset..end))
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(Pcm {
+                    data: data.to_vec(),
                     ts: Timestamp::new(us.max(0)),
                     dur: MediaDuration::ZERO,
                     trim_start: MediaDuration::ZERO,
                     trim_end: MediaDuration::ZERO,
-                })
+                }))
             }
+            Packets::V05(packets) => Ok(packets.next_data()?.map(|data| Pcm {
+                data,
+                // The fallback decoder reads the data of a packet, not its times.
+                ts: Timestamp::new(0),
+                dur: MediaDuration::ZERO,
+                trim_start: MediaDuration::ZERO,
+                trim_end: MediaDuration::ZERO,
+            })),
         }
     }
 
@@ -891,6 +1044,7 @@ impl Packets {
                 *next = list.partition_point(|packet| packet.2 < target);
                 0.0
             }
+            Packets::V05(packets) => packets.seek(seconds),
         }
     }
 }
@@ -901,6 +1055,8 @@ enum Decode {
         decoder: Box<OpusDecoder>,
         scratch: Vec<f32>,
     },
+    /// The fallback decoder of MP4 sound.
+    V05(Decoder05),
 }
 
 /// A decoded audio file as a rodio source.
@@ -915,6 +1071,8 @@ struct AudioSource {
     /// Interleaved samples still to drop at the start (Opus pre-skip).
     skip: usize,
     total: Option<Duration>,
+    /// Why the last `refill` ended the sound, when it was an error.
+    failure: Option<String>,
 }
 
 fn count(channels: u16) -> ChannelCount {
@@ -930,11 +1088,24 @@ fn rate(hz: u32) -> SampleRate {
 }
 
 impl AudioSource {
+    /// The reader that decodes the sound, for the log.
+    fn path(&self) -> &'static str {
+        match self.decode {
+            Decode::V05(_) => "fallback",
+            _ => "main",
+        }
+    }
+
     /// Decodes the next packet into `pending`; `false` at the end.
     fn refill(&mut self) -> bool {
         loop {
-            let Some(packet) = self.packets.next() else {
-                return false;
+            let packet = match self.packets.next() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => return false,
+                Err(err) => {
+                    self.failure = Some(format!("read error: {err}"));
+                    return false;
+                }
             };
             self.pending.clear();
             self.at = 0;
@@ -962,9 +1133,23 @@ impl AudioSource {
                             decoded.copy_to_vec_interleaved::<f32>(&mut self.pending);
                         }
                         Err(SymphoniaError::DecodeError(_)) => continue,
-                        Err(_) => return false,
+                        Err(err) => {
+                            self.failure = Some(format!("decode error: {err}"));
+                            return false;
+                        }
                     }
                 }
+                Decode::V05(decoder) => match decoder.decode(&packet.data, &mut self.pending) {
+                    media_audio_v05::Decoded::Samples { channels, rate } => {
+                        self.channels = channels;
+                        self.rate = rate;
+                    }
+                    media_audio_v05::Decoded::Skip => continue,
+                    media_audio_v05::Decoded::Stop(err) => {
+                        self.failure = Some(format!("decode error: {err}"));
+                        return false;
+                    }
+                },
             }
             if self.skip > 0 {
                 let dropped = self.skip.min(self.pending.len());
@@ -1019,6 +1204,11 @@ impl Source for AudioSource {
                 self.skip = frames * usize::from(self.channels);
             }
             Decode::Opus { decoder, .. } => decoder.reset(),
+            Decode::V05(decoder) => {
+                decoder.reset();
+                let frames = (gap * f64::from(self.rate)).round() as usize;
+                self.skip = frames * usize::from(self.channels);
+            }
         }
         self.pending.clear();
         self.at = 0;
@@ -1079,23 +1269,38 @@ impl BufferedAudio {
     fn next_message(&self) -> Option<AudioMessage> {
         match self.messages.try_recv() {
             Ok(message) => Some(message),
-            Err(mpsc::TryRecvError::Disconnected) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.worker_lost();
+                None
+            }
             Err(mpsc::TryRecvError::Empty) => {
                 if !self.fresh {
                     self.stats.underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                self.messages.recv().ok()
+                let message = self.messages.recv().ok();
+                if message.is_none() {
+                    self.worker_lost();
+                }
+                message
             }
         }
+    }
+
+    /// The worker only stops when this source is dropped, so a closed queue
+    /// here means that the worker panicked.
+    fn worker_lost(&self) {
+        self.stats.record_end("the decode worker stopped");
     }
 
     fn new(source: AudioSource) -> Self {
         let channels = source.channels;
         let rate = source.rate;
         let total = source.total;
+        let stats = Arc::new(AudioStats::with_path(source.path()));
         let (tx, messages) = mpsc::sync_channel(AUDIO_QUEUE_CHUNKS);
         let (seeks, seek_rx) = mpsc::channel();
-        thread::spawn(move || audio_worker(source, tx, seek_rx));
+        let worker_stats = Arc::clone(&stats);
+        thread::spawn(move || audio_worker(source, tx, seek_rx, worker_stats));
         Self {
             messages,
             seeks,
@@ -1107,7 +1312,7 @@ impl BufferedAudio {
             channels,
             rate,
             total,
-            stats: Arc::new(AudioStats::default()),
+            stats,
         }
     }
 }
@@ -1117,6 +1322,7 @@ fn audio_worker(
     mut source: AudioSource,
     out: mpsc::SyncSender<AudioMessage>,
     seeks: Receiver<AudioSeek>,
+    stats: Arc<AudioStats>,
 ) {
     let mut epoch = 0;
     let mut waiting: Option<AudioMessage> = None;
@@ -1169,8 +1375,14 @@ fn audio_worker(
                 }
             } else {
                 finished = true;
+                if let Some(reason) = source.failure.take() {
+                    stats.record_end(&reason);
+                }
                 AudioMessage::End { epoch }
             });
+            if let Some(AudioMessage::Chunk { samples, .. }) = &waiting {
+                stats.record_samples(samples);
+            }
             source.at = 0;
         }
         if let Some(message) = waiting.take() {
@@ -1262,8 +1474,39 @@ fn opus_decoder(channels: usize) -> Result<Decode, String> {
     })
 }
 
+/// The readable name of a codec of symphonia 0.6.
+fn codec_name(codec: AudioCodecId) -> String {
+    let name = match codec {
+        well_known::CODEC_ID_AAC => CODEC_AAC,
+        well_known::CODEC_ID_AC3 => "AC-3",
+        well_known::CODEC_ID_ALAC => "ALAC",
+        well_known::CODEC_ID_DCA => "DTS",
+        well_known::CODEC_ID_EAC3 => "E-AC-3",
+        well_known::CODEC_ID_FLAC => "FLAC",
+        well_known::CODEC_ID_MP1 => "MP1",
+        well_known::CODEC_ID_MP2 => "MP2",
+        well_known::CODEC_ID_MP3 => "MP3",
+        well_known::CODEC_ID_OPUS => "Opus",
+        well_known::CODEC_ID_VORBIS => "Vorbis",
+        other => return format!("codec {other}"),
+    };
+    name.to_string()
+}
+
+fn track_info(params: &AudioCodecParameters) -> TrackInfo {
+    TrackInfo::new(
+        codec_name(params.codec),
+        params
+            .channels
+            .as_ref()
+            .map(|channels| channels.count() as u16),
+        params.sample_rate,
+        params.extra_data.as_deref(),
+    )
+}
+
 /// Reads an audio file, or the sound of an MP4, MOV or M4V file.
-fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, String> {
+fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, AudioOpenError> {
     let stream =
         MediaSourceStream::new(Box::new(Cursor::new(Arc::clone(bytes))), Default::default());
     let mut hint = Hint::new();
@@ -1277,7 +1520,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|_| "unsupported audio".to_string())?;
+        .map_err(|err| AudioOpenError::probe(err.to_string()))?;
     let (track_id, params, delay, num_frames) = reader
         .tracks()
         .iter()
@@ -1287,7 +1530,8 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             }
             _ => None,
         })
-        .ok_or(NO_AUDIO_TRACK)?;
+        .ok_or_else(AudioOpenError::no_track)?;
+    let track = track_info(&params);
     let mut source = if params.codec == CODEC_ID_OPUS {
         let channels = params
             .channels
@@ -1296,20 +1540,28 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
         let mut source = AudioSource {
             packets: Packets::Format { reader, track_id },
             track_id,
-            decode: opus_decoder(channels)?,
+            decode: opus_decoder(channels)
+                .map_err(|err| AudioOpenError::decoder(track.clone(), false, err))?,
             channels: channels.clamp(1, 2) as u16,
             rate: OPUS_RATE,
             pending: Vec::new(),
             at: 0,
             skip: delay.unwrap_or(0) as usize * channels.clamp(1, 2),
             total: None,
+            failure: None,
         };
         source.total = ogg_opus_duration(bytes, delay.unwrap_or(0));
         source
     } else {
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(&params, &AudioDecoderOptions::default())
-            .map_err(|_| "unsupported audio".to_string())?;
+            .map_err(|err| {
+                AudioOpenError::decoder(
+                    track.clone(),
+                    matches!(err, SymphoniaError::Unsupported(_)),
+                    err.to_string(),
+                )
+            })?;
         let total = match (num_frames, params.sample_rate) {
             (Some(frames), Some(hz)) if hz > 0 => {
                 Some(Duration::from_secs_f64(frames as f64 / f64::from(hz)))
@@ -1329,13 +1581,73 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             at: 0,
             skip: 0,
             total,
+            failure: None,
         }
     };
     // Decode the first packet: the real channel count and rate come with it.
     if !source.refill() {
-        return Err("unsupported audio".to_string());
+        return Err(AudioOpenError::first_packet(track));
     }
     Ok(source)
+}
+
+/// The sound of an MP4 file, read by symphonia 0.5: the AAC-LC layer of an
+/// HE-AAC track plays here, where 0.6 refuses the track.
+fn symphonia05_source(bytes: &Arc<[u8]>) -> Result<AudioSource, AudioOpenError> {
+    let opened = media_audio_v05::open(bytes)?;
+    let mut source = AudioSource {
+        packets: Packets::V05(opened.packets),
+        track_id: opened.track_id,
+        decode: Decode::V05(opened.decoder),
+        channels: opened.channels,
+        rate: opened.rate,
+        pending: Vec::new(),
+        at: 0,
+        skip: 0,
+        total: opened.total,
+        failure: None,
+    };
+    // Decode the first packet: the real channel count and rate come with it.
+    if !source.refill() {
+        return Err(AudioOpenError::first_packet(opened.track));
+    }
+    Ok(source)
+}
+
+/// Whether the container of `extension` is MP4.
+fn is_mp4(extension: &str) -> bool {
+    matches!(extension, "mp4" | "m4a" | "mov" | "m4v")
+}
+
+/// The sound of an audio file or of an MP4, MOV or M4V file. An MP4 that
+/// the main reader refuses goes to the fallback reader; if that fails as
+/// well, the error of the main reader comes back, with the other reason.
+fn audio_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, AudioOpenError> {
+    let primary = match symphonia_source(bytes, extension) {
+        Ok(source) => return Ok(source),
+        Err(err) => err,
+    };
+    if !is_mp4(extension) {
+        return Err(primary);
+    }
+    // A damaged file can make the 0.5 crates panic: that must not stop the
+    // controller thread.
+    let second =
+        catch_unwind(AssertUnwindSafe(|| symphonia05_source(bytes))).unwrap_or_else(|_| {
+            Err(AudioOpenError::probe(
+                "the fallback reader stopped on the file".to_string(),
+            ))
+        });
+    match second {
+        Ok(source) => {
+            cordiale_core::persistence::log_line(&format!(
+                "audio opened by the fallback reader: {}",
+                primary.describe()
+            ));
+            Ok(source)
+        }
+        Err(err) => Err(primary.with_fallback(&err)),
+    }
 }
 
 /// The Vorbis sound of a WebM file. symphonia decodes the packets; the
@@ -1370,6 +1682,7 @@ fn vorbis_source(
         at: 0,
         skip: 0,
         total,
+        failure: None,
     };
     source.refill().then_some(source)
 }
@@ -2184,12 +2497,13 @@ impl VideoPlayer {
     }
 }
 
+/// A video, its sound if the player decodes it, and why the sound did not
+/// open when the file has a track that the player cannot play.
+type VideoOpened = (VideoPlayer, Option<AudioSource>, Option<AudioOpenError>);
+
 /// Opens the video of an MP4, MOV, M4V or WebM file, and its sound if the
 /// file has a sound that the player decodes.
-fn open_video(
-    bytes: &Arc<[u8]>,
-    extension: &str,
-) -> Result<(VideoPlayer, Option<AudioSource>), String> {
+fn open_video(bytes: &Arc<[u8]>, extension: &str) -> Result<VideoOpened, String> {
     if extension == "webm" {
         let media = media_demux::webm(bytes)?;
         let track = media.video.ok_or("no video track")?;
@@ -2218,20 +2532,29 @@ fn open_video(
                 at: 0,
                 skip: opus.pre_skip * channels,
                 total,
+                failure: None,
             };
             (first && source.refill()).then_some(source)
         });
         let audio = audio.or(vorbis);
+        let mut audio_error = None;
         if audio.is_none() && (has_opus || has_vorbis) {
             cordiale_core::persistence::log_line("webm audio track could not be opened");
+            audio_error = Some(AudioOpenError::probe(
+                "webm audio track could not be opened".to_string(),
+            ));
         }
-        return Ok((VideoPlayer::new(Arc::clone(bytes), track)?, audio));
+        return Ok((
+            VideoPlayer::new(Arc::clone(bytes), track)?,
+            audio,
+            audio_error,
+        ));
     }
     let track = media_demux::mp4_video(bytes)?;
     let player = VideoPlayer::new(Arc::clone(bytes), track)?;
     // A file without a sound that the player decodes plays without sound.
-    let audio = audio_or_log(symphonia_source(bytes, "mp4"));
-    Ok((player, audio))
+    let (audio, audio_error) = audio_or_log(audio_source(bytes, "mp4"));
+    Ok((player, audio, audio_error))
 }
 
 /// How many samples the poster frame may decode before it gives up.
@@ -2275,27 +2598,29 @@ pub fn poster_frame(bytes: &Arc<[u8]>, extension: &str) -> Result<Poster, String
     first_picture(player)
 }
 
-/// The message `symphonia_source` gives when the file has no audio track.
-const NO_AUDIO_TRACK: &str = "no audio track";
-
 /// Whether an audio error is worth a log line: a file without an audio
 /// track is normal, any other error means a present track failed.
-fn audio_error_is_loggable(err: &str) -> bool {
-    err != NO_AUDIO_TRACK
+fn audio_error_is_loggable(err: &AudioOpenError) -> bool {
+    err.stage != OpenStage::NoTrack
 }
 
-/// The sound of a video, or `None`. A missing audio track stays silent in
-/// the log; a track that fails to open is logged.
-fn audio_or_log(result: Result<AudioSource, String>) -> Option<AudioSource> {
+/// The sound of a video, or `None`, and the error of a track that failed to
+/// open. A missing audio track stays silent in the log and gives no error; a
+/// track that fails to open is logged.
+fn audio_or_log(
+    result: Result<AudioSource, AudioOpenError>,
+) -> (Option<AudioSource>, Option<AudioOpenError>) {
     match result {
-        Ok(source) => Some(source),
+        Ok(source) => (Some(source), None),
         Err(err) => {
-            if audio_error_is_loggable(&err) {
-                cordiale_core::persistence::log_line(&format!(
-                    "video audio track could not be opened: {err}"
-                ));
+            if !audio_error_is_loggable(&err) {
+                return (None, None);
             }
-            None
+            cordiale_core::persistence::log_line(&format!(
+                "video audio track could not be opened: {}",
+                err.describe()
+            ));
+            (None, Some(err))
         }
     }
 }
@@ -2434,23 +2759,20 @@ mod tests {
 
     #[test]
     fn a_missing_audio_track_is_not_logged() {
-        assert!(!audio_error_is_loggable(NO_AUDIO_TRACK));
-        assert!(audio_error_is_loggable("unsupported audio"));
-    }
-
-    #[test]
-    fn the_audio_output_line_names_the_device() {
-        assert_eq!(
-            audio_output_line(Some("Speakers (host: WASAPI)")),
-            "audio output opened: Speakers (host: WASAPI)"
-        );
-        assert!(audio_output_line(None).contains("name not available"));
+        assert!(!audio_error_is_loggable(&AudioOpenError::no_track()));
+        assert!(audio_error_is_loggable(&AudioOpenError::probe(
+            "bad file".to_string()
+        )));
     }
 
     #[test]
     fn a_failed_audio_track_gives_no_source() {
-        assert!(audio_or_log(Err(NO_AUDIO_TRACK.to_string())).is_none());
-        assert!(audio_or_log(Err("unsupported audio".to_string())).is_none());
+        let (source, error) = audio_or_log(Err(AudioOpenError::no_track()));
+        assert!(source.is_none() && error.is_none());
+        let failed = AudioOpenError::first_packet(TrackInfo::default());
+        let (source, error) = audio_or_log(Err(failed));
+        assert!(source.is_none());
+        assert_eq!(error.map(|err| err.reason_key()), Some("decode_failed"));
     }
 
     fn gray(width: usize, height: usize, luma: u8) -> Planar {
@@ -2593,10 +2915,11 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_cannot_be_opened_gives_the_same_error() {
+    fn a_file_that_cannot_be_read_gives_a_probe_error() {
         let bytes: Arc<[u8]> = Arc::from(b"not media".to_vec());
-        let error = symphonia_source(&bytes, "wav").err();
-        assert_eq!(error.as_deref(), Some("unsupported audio"));
+        let error = symphonia_source(&bytes, "wav").err().expect("an error");
+        assert_eq!(error.stage, OpenStage::Probe);
+        assert_eq!(error.reason_key(), "probe_failed");
     }
 
     /// One second of a ramp: 16-bit mono PCM in a WAV container.
@@ -2696,6 +3019,162 @@ mod tests {
         }
         source.try_seek(Duration::ZERO).expect("a seek");
         assert_eq!(source.count(), 8_000);
+    }
+
+    const AAC_STEREO: &[u8] = include_bytes!("../test-data/tone_aac_lc_stereo.m4a");
+    const AAC_MONO_8K: &[u8] = include_bytes!("../test-data/tone_aac_lc_mono_8k.m4a");
+    const AAC_51: &[u8] = include_bytes!("../test-data/tone_aac_51.m4a");
+    const AC3: &[u8] = include_bytes!("../test-data/tone_ac3.mp4");
+    /// The stereo file, with an audio specific configuration of explicit SBR.
+    const AAC_EXPLICIT_SBR: &[u8] = include_bytes!("../test-data/tone_he_aac_explicit_sbr.m4a");
+    /// Object type 5 (SBR), 24000 Hz, 2 channels, extension rate 48000 Hz,
+    /// underlying type 2 (AAC-LC), three zero flags, padded to 5 bytes.
+    const EXPLICIT_SBR_CONFIG: [u8; 5] = [0x2B, 0x11, 0x88, 0x00, 0x00];
+
+    fn bytes_of(data: &'static [u8]) -> Arc<[u8]> {
+        Arc::from(data)
+    }
+
+    fn peak(samples: &[Sample]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0, |peak: f32, sample| peak.max(sample.abs()))
+    }
+
+    /// The error of a file that must not open.
+    fn open_error(bytes: &Arc<[u8]>, extension: &str) -> AudioOpenError {
+        match audio_source(bytes, extension) {
+            Ok(_) => panic!("the file opened"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn the_main_reader_decodes_an_aac_lc_file() {
+        let source = symphonia_source(&bytes_of(AAC_STEREO), "m4a").expect("an AAC source");
+        assert_eq!(source.channels, 2);
+        assert_eq!(source.rate, 44_100);
+        let samples: Vec<Sample> = source.collect();
+        assert!(samples.len() >= 80_000, "{} samples", samples.len());
+        assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+    }
+
+    #[test]
+    fn the_fallback_reader_decodes_an_aac_lc_file() {
+        let bytes = bytes_of(AAC_STEREO);
+        let source = symphonia05_source(&bytes).expect("an AAC source");
+        assert_eq!(source.channels, 2);
+        assert_eq!(source.rate, 44_100);
+        let samples: Vec<Sample> = source.collect();
+        assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+        let main: Vec<Sample> = symphonia_source(&bytes, "m4a").expect("a source").collect();
+        assert!(samples.len().abs_diff(main.len()) <= 2_048);
+    }
+
+    #[test]
+    fn both_readers_decode_a_mono_file_of_8_khz() {
+        let bytes = bytes_of(AAC_MONO_8K);
+        let main = symphonia_source(&bytes, "m4a").expect("an AAC source");
+        let fallback = symphonia05_source(&bytes).expect("an AAC source");
+        for source in [main, fallback] {
+            assert_eq!(source.channels, 1);
+            assert_eq!(source.rate, 8_000);
+            let samples: Vec<Sample> = source.collect();
+            assert!(samples.len() >= 3_000, "{} samples", samples.len());
+            assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+        }
+    }
+
+    #[test]
+    fn both_readers_seek_in_an_aac_file() {
+        let bytes = bytes_of(AAC_STEREO);
+        let main = symphonia_source(&bytes, "m4a").expect("an AAC source");
+        let fallback = symphonia05_source(&bytes).expect("an AAC source");
+        for mut source in [main, fallback] {
+            source.try_seek(Duration::from_millis(500)).expect("a seek");
+            let samples: Vec<Sample> = source.collect();
+            // The file holds a second: about half of its samples are left.
+            assert!(
+                samples.len() > 36_000 && samples.len() < 56_000,
+                "{} samples",
+                samples.len()
+            );
+            assert!(peak(&samples) > 0.05);
+        }
+    }
+
+    #[test]
+    fn a_file_with_six_channels_gives_a_typed_error() {
+        let error = open_error(&bytes_of(AAC_51), "m4a");
+        assert_eq!(error.reason_key(), "too_many_channels");
+        assert_eq!(error.stage, OpenStage::Decoder);
+        assert_eq!(error.track.codec.as_deref(), Some("AAC"));
+        assert_eq!(error.track.channels, Some(6));
+        assert_eq!(error.track.sample_rate, Some(44_100));
+        assert_eq!(error.track.profile.as_deref(), Some("AAC-LC"));
+        // The fallback reader tried the file and failed too.
+        assert!(error.fallback.is_some());
+        assert!(error.describe().contains("6 channels"));
+    }
+
+    #[test]
+    fn a_file_with_ac3_sound_gives_a_typed_error() {
+        let error = open_error(&bytes_of(AC3), "mp4");
+        assert_eq!(error.reason_key(), "unsupported_codec");
+        assert_eq!(error.track.codec.as_deref(), Some("AC-3"));
+        assert!(error.describe().contains("AC-3"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_mp4_gets_no_second_try() {
+        let bytes: Arc<[u8]> = Arc::from(b"not media".to_vec());
+        let error = open_error(&bytes, "wav");
+        assert_eq!(error.reason_key(), "probe_failed");
+        assert!(error.fallback.is_none());
+    }
+
+    #[test]
+    fn only_the_fallback_decoder_takes_explicit_sbr_signalling() {
+        // The 0.6 decoder refuses the stream.
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(well_known::CODEC_ID_AAC)
+            .with_sample_rate(24_000)
+            .with_extra_data(Box::from(EXPLICIT_SBR_CONFIG));
+        let refused = symphonia::default::get_codecs()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default());
+        let Err(err) = refused else {
+            panic!("the 0.6 decoder took the stream");
+        };
+        assert!(err.to_string().contains("too complex"), "{err}");
+        // The 0.5 decoder reads past the flag and makes a decoder.
+        let mut params = symphonia05::core::codecs::CodecParameters::new();
+        params
+            .for_codec(symphonia05::core::codecs::CODEC_TYPE_AAC)
+            .with_sample_rate(24_000)
+            .with_extra_data(Box::from(EXPLICIT_SBR_CONFIG));
+        let made = symphonia05::default::get_codecs().make(
+            &params,
+            &symphonia05::core::codecs::DecoderOptions::default(),
+        );
+        if let Err(err) = made {
+            panic!("the 0.5 decoder refused the stream: {err}");
+        }
+    }
+
+    #[test]
+    fn an_mp4_with_explicit_sbr_signalling_plays_through_the_fallback() {
+        let bytes = bytes_of(AAC_EXPLICIT_SBR);
+        let error = symphonia_source(&bytes, "m4a")
+            .err()
+            .expect("the main reader refuses the file");
+        assert_eq!(error.reason_key(), "unsupported_profile");
+        assert_eq!(error.track.profile.as_deref(), Some("HE-AAC (SBR)"));
+        let source = audio_source(&bytes, "m4a").expect("the fallback reader plays the file");
+        assert_eq!(source.channels, 2);
+        let samples: Vec<Sample> = source.collect();
+        assert!(samples.len() >= 80_000, "{} samples", samples.len());
+        assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
     }
 
     fn crc8(data: &[u8]) -> u8 {
@@ -3277,6 +3756,56 @@ mod tests {
         drop(tx);
         assert_eq!(audio.next(), None);
         assert_eq!(audio.stats.underruns.load(Ordering::Relaxed), 0);
+        // The worker only stops with the source: this is an early end.
+        assert_eq!(
+            audio.stats.end_reason().as_deref(),
+            Some("the decode worker stopped")
+        );
+    }
+
+    #[test]
+    fn the_stats_keep_the_peak_and_count_the_samples() {
+        let stats = AudioStats::with_path("main");
+        assert_eq!(stats.peak(), 0.0);
+        stats.record_samples(&[0.25, -0.75, 0.5]);
+        stats.record_samples(&[0.125]);
+        stats.record_samples(&[]);
+        assert_eq!(stats.peak(), 0.75);
+        assert_eq!(stats.samples.load(Ordering::Relaxed), 4);
+        stats.record_samples(&[-1.0]);
+        assert_eq!(stats.peak(), 1.0);
+    }
+
+    #[test]
+    fn only_the_first_early_end_is_kept() {
+        let stats = AudioStats::default();
+        assert_eq!(stats.end_reason(), None);
+        stats.record_end("decode error: first");
+        stats.record_end("read error: second");
+        assert_eq!(stats.end_reason().as_deref(), Some("decode error: first"));
+    }
+
+    #[test]
+    fn the_stats_name_the_reader_of_the_sound() {
+        let bytes = bytes_of(AAC_STEREO);
+        let main = symphonia_source(&bytes, "m4a").expect("an AAC source");
+        assert_eq!(main.path(), "main");
+        assert_eq!(BufferedAudio::new(main).stats().path, "main");
+        let fallback = symphonia05_source(&bytes).expect("an AAC source");
+        assert_eq!(fallback.path(), "fallback");
+        assert_eq!(BufferedAudio::new(fallback).stats().path, "fallback");
+    }
+
+    #[test]
+    fn the_worker_records_the_samples_that_it_decodes() {
+        let source = symphonia_source(&wav_second(8_000), "wav").expect("a source");
+        let buffered = BufferedAudio::new(source);
+        let stats = buffered.stats();
+        let samples = buffered.count();
+        assert_eq!(samples, 8_000);
+        assert_eq!(stats.samples.load(Ordering::Relaxed), 8_000);
+        assert!(stats.peak() > 0.1);
+        assert_eq!(stats.end_reason(), None);
     }
 
     #[test]
@@ -3293,11 +3822,15 @@ mod tests {
             decode_max: Duration::from_millis(5),
             convert_max: Duration::from_millis(7),
         };
-        let line = playback_summary(Some(&stats), Some(6), AUDIO_PLAYING);
+        let audio = AudioStats::with_path("main");
+        audio.underruns.store(6, Ordering::Relaxed);
+        audio.record_samples(&[0.25, -0.5, 0.125]);
+        let line = playback_summary(Some(&stats), Some(&audio), AUDIO_PLAYING);
         assert_eq!(
             line,
             "media playback: audio=playing decoder=VA-API shown=120 late=3 dropped=1 starved=2 \
-             decode_avg=2.0ms decode_max=5.0ms convert_max=7.0ms audio_underruns=6"
+             decode_avg=2.0ms decode_max=5.0ms convert_max=7.0ms audio_underruns=6 \
+             audio_path=main audio_peak=0.500 audio_samples=3"
         );
         let fallback = VideoStats {
             decoder: "software",
@@ -3307,8 +3840,21 @@ mod tests {
         assert!(playback_summary(Some(&fallback), None, AUDIO_NO_OUTPUT)
             .contains("software (fallback)"));
         assert_eq!(
-            playback_summary(None, Some(0), AUDIO_PLAYING),
-            "media playback: audio=playing audio_underruns=0"
+            playback_summary(
+                None,
+                Some(&AudioStats::with_path("fallback")),
+                AUDIO_PLAYING
+            ),
+            "media playback: audio=playing audio_underruns=0 audio_path=fallback \
+             audio_peak=0.000 audio_samples=0"
+        );
+        // A sound that ended on an error says why, at the end of the line.
+        let ended = AudioStats::with_path("main");
+        ended.record_end("read error: broken");
+        assert_eq!(
+            playback_summary(None, Some(&ended), AUDIO_PLAYING),
+            "media playback: audio=playing audio_underruns=0 audio_path=main \
+             audio_peak=0.000 audio_samples=0 audio_end=read error: broken"
         );
         // A video with a sound and no output, and a video with no sound,
         // read differently in the log.

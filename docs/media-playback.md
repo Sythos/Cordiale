@@ -8,6 +8,18 @@ La decodifica hardware è opzionale (`media_hw.rs`, feature `hw-decode`).
 - **Audio:** un thread di lavoro (`audio_worker`) legge e decodifica i pacchetti e
   li passa all'uscita audio con una coda limitata (`AUDIO_QUEUE_CHUNKS`, 32
   blocchi). L'uscita non decodifica mai: prende solo campioni già pronti.
+- **Audio degli MP4:** symphonia 0.6 legge il contenitore e decodifica l'AAC-LC
+  (al massimo 2 canali). Se la 0.6 rifiuta la traccia, per esempio un HE-AAC
+  con SBR dichiarato nella configurazione, il lettore riprova con symphonia
+  0.5 (`media_audio_v05.rs`): la 0.5 legge l'AAC come AAC-LC e suona lo strato
+  di base, con meno banda ma con suono. Restano muti i file con più di 2
+  canali, con AC-3, E-AC-3 o ALAC e con più di una voce `stsd`. Un errore
+  dell'apertura è tipizzato (`media_audio_error.rs`: fase, codec, profilo,
+  canali, frequenza e messaggio della libreria) e il registro riporta la
+  chiave del motivo: `no_track`, `unsupported_codec`, `too_many_channels`,
+  `unsupported_profile`, `probe_failed` o `decode_failed`. Quando suona il
+  lettore di riserva, il registro lo dice con «audio opened by the fallback
+  reader».
 - **Video:** il thread del controller decodifica, converte in RGBA e consegna i
   fotogrammi alla finestra. Con una traccia audio, l'audio è l'orologio del
   video; senza audio si usa l'orologio di sistema.
@@ -28,7 +40,7 @@ Alla chiusura di ogni file il lettore scrive una riga nel registro
 dell'applicazione:
 
 ```
-media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg=2.1ms decode_max=9.0ms convert_max=4.0ms audio_underruns=0
+media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg=2.1ms decode_max=9.0ms convert_max=4.0ms audio_underruns=0 audio_path=main audio_peak=0.412 audio_samples=1411200
 ```
 
 | Campo | Significato |
@@ -42,6 +54,34 @@ media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starve
 | `convert_max` | tempo massimo della conversione colore di un'immagine |
 | `audio` | stato del suono all'apertura: `playing` (suono su un'uscita aperta), `no_output` (il file ha un suono ma nessuna uscita è aperta: parte muto), `no_track` (nessuna traccia audio, o traccia che non si apre) |
 | `audio_underruns` | volte in cui l'uscita audio ha trovato la coda vuota (un vuoto nel suono); l'attesa all'inizio e dopo uno spostamento non conta |
+| `audio_path` | il lettore che decodifica il suono: `main` (symphonia 0.6, Opus) o `fallback` (symphonia 0.5, solo per gli MP4 che la 0.6 rifiuta) |
+| `audio_peak` | il campione più alto in valore assoluto che il decodificatore ha prodotto, prima del volume, da 0 a 1. `0.000` con `audio_samples` maggiore di zero vuol dire che il file decodifica in silenzio |
+| `audio_samples` | quanti campioni ha prodotto il decodificatore (tutti i canali) |
+| `audio_end` | presente solo se il suono è finito prima della fine del file per un errore: `read error: ...` (il lettore del contenitore), `decode error: ...` (il decodificatore) o `the decode worker stopped` (il thread di decodifica si è fermato). La stessa causa è nella riga `audio ended early` |
+
+Le righe del registro sul suono, in ordine di apertura:
+
+| Riga | Quando |
+|---|---|
+| `default audio output failed: <errore>; trying the other outputs` | l'uscita predefinita non si è aperta: rodio prova le altre uscite |
+| `audio output: the default device failed, another device is open` | una delle altre uscite si è aperta (rodio non dice quale) |
+| `audio output opened: <nome (host)>; stream: <canali> ch, <frequenza> Hz, <formato>, buffer <frame>` | un'uscita si è aperta, per la radio o per un file; il nome è quello dell'uscita predefinita del sistema, il resto è la configurazione reale del flusso |
+| `no audio output: <errore>` | nessuna uscita si è aperta |
+| `audio stream error: <errore>` | il flusso ha segnalato un errore. Un errore nuovo si scrive subito, uno ripetuto solo alla 2ª, 4ª, 8ª... volta con `(xN)` |
+| `video audio track could not be opened: <motivo>` | il video ha una traccia audio che non si apre; il motivo porta la chiave `[unsupported_codec]`, `[too_many_channels]`... |
+| `audio file could not be opened: <motivo>` | lo stesso per un file audio |
+| `audio opened by the fallback reader: <motivo>` | la 0.6 ha rifiutato la traccia e la 0.5 la suona |
+| `audio ended early: <motivo>` | il suono è finito per un errore, una volta per file |
+| `media playback: audio=...` | il riepilogo alla chiusura del file (sopra) |
+
+Il visualizzatore dice a voce quando un suono non si riproduce, sotto i
+controlli del video (e al posto del testo generico per un file audio che non
+si apre), con una frase tradotta scelta dalla chiave del motivo:
+`unsupported_codec`, `unsupported_profile`, `too_many_channels`,
+`probe_failed`, `decode_failed` o `no_output` (nessuna uscita audio aperta).
+Un video senza traccia audio (`no_track`) resta muto senza alcun avviso. La
+frase non contiene mai il nome del file; il motivo tecnico completo è solo nel
+registro.
 
 Come leggerle: `starved` alto con `decode_max` oltre il tempo di fotogramma
 significa che il decodificatore è troppo lento (provare l'hardware).

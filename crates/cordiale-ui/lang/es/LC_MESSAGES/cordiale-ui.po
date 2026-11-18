@@ -4234,3 +4234,31 @@ msgstr[1] "{n} mensajes sin leer"
 msgctxt "AppWindow"
 msgid "Next mention ({})"
 msgstr "Siguiente mención ({})"
+
+msgctxt "AppWindow"
+msgid "This sound has more than 2 channels ({} channels). Cordiale cannot play it."
+msgstr "Este sonido tiene más de 2 canales ({} canales). Cordiale no puede reproducirlo."
+
+msgctxt "AppWindow"
+msgid "The sound file could not be opened."
+msgstr "No se pudo abrir el archivo de audio."
+
+msgctxt "AppWindow"
+msgid "This sound file uses a format that Cordiale cannot play ({})."
+msgstr "Este archivo de audio usa un formato que Cordiale no puede reproducir ({})."
+
+msgctxt "AppWindow"
+msgid "No audio output is open. The video plays without sound."
+msgstr "No hay ninguna salida de audio abierta. El vídeo se reproduce sin sonido."
+
+msgctxt "AppWindow"
+msgid "This video has sound with more than 2 channels ({} channels). Cordiale cannot play it. The picture plays without sound."
+msgstr "Este vídeo tiene un sonido con más de 2 canales ({} canales). Cordiale no puede reproducirlo. La imagen se reproduce sin sonido."
+
+msgctxt "AppWindow"
+msgid "The sound of this video could not be opened. The picture plays without sound."
+msgstr "No se pudo abrir el sonido de este vídeo. La imagen se reproduce sin sonido."
+
+msgctxt "AppWindow"
+msgid "This video has sound that Cordiale cannot play ({}). The picture plays without sound."
+msgstr "Este vídeo tiene un sonido que Cordiale no puede reproducir ({}). La imagen se reproduce sin sonido."
