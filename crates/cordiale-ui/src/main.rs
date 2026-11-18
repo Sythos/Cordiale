@@ -56,6 +56,7 @@ mod media_hw;
 mod media_player;
 mod media_save;
 mod mentions;
+mod notification_sound;
 mod passkeys;
 mod player;
 mod queries;
@@ -666,6 +667,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.set_radio_volume(i32::from(settings.radio_volume));
     ui.set_pref_shrink_videos(settings.shrink_videos);
+    ui.set_local_sound_direct_index(notification_sound::choice_index(&settings.sound_direct));
+    ui.set_local_sound_mention_index(notification_sound::choice_index(&settings.sound_mention));
+    ui.set_local_sound_volume(i32::from(settings.sound_volume.min(100)));
+    notification_sound::configure(
+        &settings.sound_direct,
+        &settings.sound_mention,
+        settings.sound_volume,
+    );
     audio_output::shared().set(settings.audio_output.clone());
     ui.set_video_shrink_available(video_processing::is_available());
     push_radio_stations(&ui, &settings.radio_stations);
@@ -2284,6 +2293,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AudioOutputChanged) => {
                         radio.reopen_output();
+                        notification_sound::reopen_output();
                         if let Some(media) = media_player::existing() {
                             media.reopen_output();
                         }
@@ -9957,6 +9967,15 @@ struct MentionContext {
 
 static MENTION_CONTEXT: std::sync::RwLock<Option<MentionContext>> = std::sync::RwLock::new(None);
 static BOLD_MENTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The mention check for one network: its own nick and the watch patterns.
+/// It does not touch the shared context of the open window.
+fn mention_context_for(state: &WorkerState, network: &str) -> MentionContext {
+    MentionContext {
+        own_nick: state.networks.own_nicks.get(network).cloned(),
+        patterns: state.prefs.watch_patterns.clone(),
+    }
+}
 
 /// Points the mention check at the open window's network.
 fn refresh_mention_context(state: &WorkerState) {

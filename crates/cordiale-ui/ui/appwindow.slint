@@ -2918,6 +2918,14 @@ export component AppWindow inherits Window {
     callback notification-list-remove(string, string);
     callback notification-unmute(string);
     callback notification-sound-changed();
+    // Sounds played on this computer (never sent to Grappa): the entry of
+    // each list (0 is "none"), the volume (0 to 100) and the preview of a
+    // list (0 for direct messages, 1 for mentions).
+    in-out property <int> local-sound-direct-index: 0;
+    in-out property <int> local-sound-mention-index: 0;
+    in-out property <int> local-sound-volume: 60;
+    callback local-sounds-changed();
+    callback local-sound-preview(int);
     // Mutes the open window for this many seconds, 0 for good.
     callback mute-current-requested(int);
     // The mute of the open conversation, for the bar above the compose box
@@ -8066,6 +8074,76 @@ export component AppWindow inherits Window {
                             current-index <=> notify-sound-index;
                             min-width: 140px;
                             selected => { notification-sound-changed(); }
+                        }
+                    }
+
+                    Text {
+                        text: @tr("Sounds on this computer");
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: @tr("Cordiale plays one of these sounds on this computer when a direct message or a mention arrives in a window that you do not look at. These choices stay on this computer and do not change the setting above.");
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: @tr("Direct message sound");
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        ComboBox {
+                            model: [@tr("None"), @tr("Kalimba"), @tr("Bell"), @tr("Alert"), @tr("Dum"), @tr("Deep bell")];
+                            current-index <=> local-sound-direct-index;
+                            min-width: 140px;
+                            selected => { local-sounds-changed(); }
+                        }
+                        CompactButton {
+                            text: "▶  " + @tr("Preview");
+                            clicked => { local-sound-preview(0); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: @tr("Mention sound");
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        ComboBox {
+                            model: [@tr("None"), @tr("Kalimba"), @tr("Bell"), @tr("Alert"), @tr("Dum"), @tr("Deep bell")];
+                            current-index <=> local-sound-mention-index;
+                            min-width: 140px;
+                            selected => { local-sounds-changed(); }
+                        }
+                        CompactButton {
+                            text: "▶  " + @tr("Preview");
+                            clicked => { local-sound-preview(1); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: @tr("Volume of these sounds: {}%", local-sound-volume);
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            minimum: 0;
+                            maximum: 100;
+                            step: 5;
+                            value: local-sound-volume;
+                            accessible-label: @tr("Volume of these sounds");
+                            horizontal-stretch: 1;
+                            changed(value) => { local-sound-volume = Math.round(value); }
+                            released(value) => {
+                                local-sound-volume = Math.round(value);
+                                local-sounds-changed();
+                            }
                         }
                     }
                 }

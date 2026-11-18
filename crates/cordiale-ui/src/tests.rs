@@ -5811,6 +5811,25 @@ fn explicit_ban_masks_have_fixed_shapes() {
 }
 
 #[test]
+fn the_mention_context_follows_the_network_of_the_line() {
+    let mut state = WorkerState::new();
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "Sythos".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("oftc".to_string(), "Enya".to_string());
+    state.windows.current_channel = Some(("libera".to_string(), "#a".to_string()));
+    let oftc = mention_context_for(&state, "oftc");
+    let libera = mention_context_for(&state, "libera");
+    assert!(is_mention("hi Enya", Some("ada"), &oftc));
+    assert!(!is_mention("hi Enya", Some("ada"), &libera));
+    assert!(!is_mention("hi Sythos", Some("ada"), &oftc));
+}
+
+#[test]
 fn mentions_follow_cicchettos_word_rule() {
     let context = MentionContext {
         own_nick: Some("Sythos".to_string()),
