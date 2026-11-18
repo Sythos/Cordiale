@@ -771,10 +771,7 @@ pub(crate) async fn handle_frame(
                 if let Some(insert) =
                     append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
-                    if notification_sound::any_chosen() {
-                        let line = render_message(effective_payload, Some(&frame.event));
-                        play_live_sound(state, &key, &line, true);
-                    }
+                    play_live_sound(state, &key, effective_payload, true);
                     show_live_query_message(state, ui, &key, insert);
                 }
             } else {
@@ -989,10 +986,7 @@ pub(crate) async fn handle_frame(
                 if let Some(insert) =
                     append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
-                    if notification_sound::any_chosen() {
-                        let line = render_message(effective_payload, Some(&frame.event));
-                        play_live_sound(state, &key, &line, true);
-                    }
+                    play_live_sound(state, &key, effective_payload, true);
                     show_live_query_message(state, ui, &key, insert);
                 }
                 if !split.is_empty() {
@@ -1032,7 +1026,7 @@ pub(crate) async fn handle_frame(
     }
     let rows = messages.len();
     if !already_shown {
-        play_live_sound(state, &key, &line, false);
+        play_live_sound(state, &key, effective_payload, false);
     }
     let open = state.windows.current_channel.as_ref() == Some(&key);
     if open && !state.windows.current_query {
@@ -2502,23 +2496,59 @@ pub(crate) fn append_query_live_message(
 pub(crate) fn play_live_sound(
     state: &WorkerState,
     key: &(String, String),
-    message: &RenderedMessage,
+    payload: &Value,
     direct: bool,
 ) {
-    if !notification_sound::any_chosen() || message.italic || message.nick.is_none() {
+    if !notification_sound::any_chosen() {
+        return;
+    }
+    // Read the original row: a `/me` action renders as a nickless italic
+    // line, but it is a message of its sender.
+    if !matches!(
+        payload.get("kind").and_then(Value::as_str),
+        None | Some("privmsg") | Some("action")
+    ) {
+        return;
+    }
+    let Some(sender) = payload
+        .get("from")
+        .or_else(|| payload.get("nick"))
+        .or_else(|| payload.get("sender"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let body = payload
+        .get("body")
+        .or_else(|| payload.get("message"))
+        .and_then(Value::as_str)
+        .map(strip_ctcp_action)
+        .unwrap_or("");
+    play_sound_for_sender(state, key, sender, body, direct);
+}
+
+/// Plays the sound of a live line from its sender and text. Used directly by
+/// the encrypted path, where the text stays inside the engine.
+pub(crate) fn play_sound_for_sender(
+    state: &WorkerState,
+    key: &(String, String),
+    sender: &str,
+    text: &str,
+    direct: bool,
+) {
+    if !notification_sound::any_chosen() {
         return;
     }
     let own = state
         .networks
         .own_nicks
         .get(&key.0)
-        .zip(message.nick.as_ref())
-        .is_some_and(|(own, nick)| own.eq_ignore_ascii_case(nick));
+        .is_some_and(|own| own.eq_ignore_ascii_case(sender));
     let kind = if direct {
         notification_sound::EventKind::DirectMessage
     } else {
         let context = mention_context_for(state, &key.0);
-        if !is_mention(&message.text, message.nick.as_deref(), &context) {
+        if !is_mention(text, Some(sender), &context) {
             return;
         }
         notification_sound::EventKind::Mention
@@ -2740,7 +2770,11 @@ pub(crate) fn drain_pending_own_nick_dms(state: &mut WorkerState) {
         };
         let key = (query.network.clone(), query.target_nick.clone());
         require_query_full_history_if_unready(state, &key);
-        append_query_live_message(state, &key, &dm.payload, Some(&dm.event_fallback));
+        // The buffered line is a live one: it gets its sound now that its
+        // conversation exists.
+        if append_query_live_message(state, &key, &dm.payload, Some(&dm.event_fallback)).is_some() {
+            play_live_sound(state, &key, &dm.payload, true);
+        }
     }
 }
 
