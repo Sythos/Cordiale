@@ -53,6 +53,23 @@ impl DeviceProvider for HostDevices {
     }
 }
 
+/// The gain of the media volume slider: 0.0 is silent and 1.0 is the full
+/// level of the file. A value that is not a finite number keeps the default
+/// gain of 1.0, so a broken slider never mutes the sound or makes it NaN.
+pub fn media_gain(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The gain of the radio volume, which is saved as a percentage. A value
+/// above 100 counts as 100.
+pub fn radio_gain(percent: u8) -> f32 {
+    f32::from(percent.min(100)) / 100.0
+}
+
 /// What the settings screen tells about the saved choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStatus {
@@ -501,6 +518,112 @@ mod tests {
             throttle.line("first").as_deref(),
             Some("audio stream error: first")
         );
+    }
+
+    #[test]
+    fn the_media_gain_stays_between_silent_and_full() {
+        assert_eq!(media_gain(0.0), 0.0);
+        assert_eq!(media_gain(1.0), 1.0);
+        assert_eq!(media_gain(0.5), 0.5);
+        assert_eq!(media_gain(-0.25), 0.0);
+        assert_eq!(media_gain(-1_000.0), 0.0);
+        assert_eq!(media_gain(1.5), 1.0);
+        assert_eq!(media_gain(1_000.0), 1.0);
+    }
+
+    #[test]
+    fn a_media_value_that_is_not_a_number_keeps_the_default_gain() {
+        assert_eq!(media_gain(f32::NAN), 1.0);
+        assert_eq!(media_gain(f32::INFINITY), 1.0);
+        assert_eq!(media_gain(f32::NEG_INFINITY), 1.0);
+    }
+
+    #[test]
+    fn the_media_gain_never_falls_when_the_value_rises() {
+        let mut last = media_gain(-1.0);
+        for step in 0..=120 {
+            let gain = media_gain(-0.1 + step as f32 * 0.01);
+            assert!((0.0..=1.0).contains(&gain), "{gain}");
+            assert!(gain >= last, "{gain} < {last}");
+            last = gain;
+        }
+    }
+
+    #[test]
+    fn the_radio_gain_goes_from_zero_to_one() {
+        assert_eq!(radio_gain(0), 0.0);
+        assert_eq!(radio_gain(100), 1.0);
+        assert_eq!(radio_gain(50), 0.5);
+        // A saved value above 100 counts as 100.
+        assert_eq!(radio_gain(101), 1.0);
+        assert_eq!(radio_gain(u8::MAX), 1.0);
+        let mut last = radio_gain(0);
+        for percent in 1..=u8::MAX {
+            let gain = radio_gain(percent);
+            assert!((0.0..=1.0).contains(&gain), "{gain}");
+            assert!(gain >= last, "{gain} < {last}");
+            last = gain;
+        }
+    }
+
+    /// Plays a constant signal of 0.5 through a player at `volume`, on a mixer
+    /// that has no audio device, and gives the samples of the output after the
+    /// first 20 ms. The player reads the volume every 5 ms of sound, so the
+    /// first samples may still have the old gain: they are left out.
+    fn mixed_at(volume: f32) -> Vec<rodio::Sample> {
+        // The queue of the player is empty when it joins the mixer; it reports
+        // one channel and 48000 Hz, so the mixer uses them and no conversion
+        // changes the samples.
+        let channels = rodio::ChannelCount::new(1).expect("one channel");
+        let rate = rodio::SampleRate::new(48_000).expect("a sample rate");
+        let (mixer, output) = rodio::mixer::mixer(channels, rate);
+        let player = rodio::Player::connect_new(&mixer);
+        player.set_volume(volume);
+        let data: Vec<rodio::Sample> = vec![0.5; 9_600];
+        player.append(rodio::buffer::SamplesBuffer::new(channels, rate, data));
+        // 20 ms are 960 samples; 8000 samples are about 167 ms. The signal
+        // lasts 200 ms, so the output never reaches its end.
+        let samples: Vec<rodio::Sample> = output.skip(960).take(8_000).collect();
+        drop(player);
+        samples
+    }
+
+    fn peak_of(samples: &[rodio::Sample]) -> rodio::Sample {
+        samples
+            .iter()
+            .fold(0.0, |peak: rodio::Sample, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn a_player_at_full_volume_passes_the_signal_unchanged() {
+        let samples = mixed_at(media_gain(1.0));
+        assert_eq!(samples.len(), 8_000);
+        assert!(samples.iter().all(|sample| (*sample - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_player_at_half_volume_halves_the_signal() {
+        let samples = mixed_at(media_gain(0.5));
+        assert_eq!(samples.len(), 8_000);
+        assert!(
+            (peak_of(&samples) - 0.25).abs() < 1e-6,
+            "{}",
+            peak_of(&samples)
+        );
+        assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_player_at_volume_zero_is_silent() {
+        let samples = mixed_at(media_gain(0.0));
+        assert_eq!(samples.len(), 8_000);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn the_radio_gain_reaches_the_output_through_the_player() {
+        let samples = mixed_at(radio_gain(25));
+        assert!(samples.iter().all(|sample| (*sample - 0.125).abs() < 1e-6));
     }
 
     #[test]

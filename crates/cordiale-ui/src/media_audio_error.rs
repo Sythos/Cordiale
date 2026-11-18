@@ -85,6 +85,9 @@ pub struct AudioOpenError {
     pub message: String,
     /// Why the second decoder failed as well, if it was tried.
     pub fallback: Option<String>,
+    /// How many audio tracks the file has that the player knows; after a
+    /// failed open, how many of them were tried. 0 when the file has none.
+    pub tracks: u8,
 }
 
 impl AudioOpenError {
@@ -95,6 +98,7 @@ impl AudioOpenError {
             unsupported: false,
             message,
             fallback: None,
+            tracks: 0,
         }
     }
 
@@ -105,6 +109,7 @@ impl AudioOpenError {
             unsupported: false,
             message: String::new(),
             fallback: None,
+            tracks: 0,
         }
     }
 
@@ -116,6 +121,7 @@ impl AudioOpenError {
             unsupported,
             message,
             fallback: None,
+            tracks: 0,
         }
     }
 
@@ -126,7 +132,14 @@ impl AudioOpenError {
             unsupported: false,
             message: "no packet could be decoded".to_string(),
             fallback: None,
+            tracks: 0,
         }
+    }
+
+    /// Notes how many audio tracks the file has, or how many were tried.
+    pub fn with_tracks(mut self, count: usize) -> Self {
+        self.tracks = u8::try_from(count).unwrap_or(u8::MAX);
+        self
     }
 
     /// What the viewer says about this error. A file without a sound track
@@ -195,6 +208,9 @@ impl AudioOpenError {
             self.reason_key(),
             self.detail()
         );
+        if self.tracks > 1 {
+            text.push_str(&format!("; {} audio tracks tried", self.tracks));
+        }
         if let Some(fallback) = &self.fallback {
             text.push_str("; fallback: ");
             text.push_str(fallback);
@@ -301,6 +317,20 @@ mod tests {
         let error = AudioOpenError::decoder(track, true, "unsupported audio codec".to_string());
         assert_eq!(error.reason_key(), "unsupported_codec");
         assert!(error.describe().contains("AC-3"));
+    }
+
+    #[test]
+    fn the_log_text_gives_the_count_of_tracks_only_above_one() {
+        let error = AudioOpenError::decoder(aac(2), true, "aac too complex".to_string());
+        assert!(!error.describe().contains("tracks tried"));
+        assert!(!error.clone().with_tracks(1).describe().contains("tried"));
+        let text = error.with_tracks(2).describe();
+        assert!(text.contains("2 audio tracks tried"), "{text}");
+        assert_eq!(AudioOpenError::no_track().with_tracks(0).tracks, 0);
+        assert_eq!(
+            AudioOpenError::no_track().with_tracks(1_000).tracks,
+            u8::MAX
+        );
     }
 
     #[test]

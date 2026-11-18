@@ -1085,7 +1085,7 @@ pub(crate) fn register_link_callbacks(
     });
     ui.on_media_volume_changed(|volume| {
         if let Some(player) = media_player::existing() {
-            player.set_volume(volume);
+            player.set_volume(audio_output::media_gain(volume));
         }
     });
     ui.on_media_closed(|| {

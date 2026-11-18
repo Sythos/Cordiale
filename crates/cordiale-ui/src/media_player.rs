@@ -650,6 +650,9 @@ struct AudioStats {
     underruns: AtomicU64,
     /// The reader that decodes the sound: `main` or `fallback`.
     path: &'static str,
+    /// The number of the audio track in the file, counted from 1; 0 when
+    /// it is not known.
+    track: u8,
     /// The largest absolute sample that the decoder made, before the gain,
     /// as the bits of an `f32`.
     peak: AtomicU32,
@@ -665,6 +668,11 @@ impl AudioStats {
             path,
             ..Self::default()
         }
+    }
+
+    fn with_track(mut self, track: u8) -> Self {
+        self.track = track;
+        self
     }
 
     /// Counts the samples of one decoded chunk and keeps the largest one.
@@ -745,9 +753,16 @@ fn playback_summary(
     }
     if let Some(audio) = audio {
         line.push_str(&format!(
-            " audio_underruns={} audio_path={} audio_peak={:.3} audio_samples={}",
+            " audio_underruns={} audio_path={}",
             audio.underruns.load(Ordering::Relaxed),
             audio.path,
+        ));
+        // Only a later track is named: the first track is the usual case.
+        if audio.track > 1 {
+            line.push_str(&format!(" audio_track={}", audio.track));
+        }
+        line.push_str(&format!(
+            " audio_peak={:.3} audio_samples={}",
             audio.peak(),
             audio.samples.load(Ordering::Relaxed),
         ));
@@ -1063,6 +1078,8 @@ enum Decode {
 struct AudioSource {
     packets: Packets,
     track_id: u32,
+    /// The number of the audio track in the file, counted from 1.
+    audio_track: u8,
     decode: Decode,
     channels: u16,
     rate: u32,
@@ -1296,7 +1313,7 @@ impl BufferedAudio {
         let channels = source.channels;
         let rate = source.rate;
         let total = source.total;
-        let stats = Arc::new(AudioStats::with_path(source.path()));
+        let stats = Arc::new(AudioStats::with_path(source.path()).with_track(source.audio_track));
         let (tx, messages) = mpsc::sync_channel(AUDIO_QUEUE_CHUNKS);
         let (seeks, seek_rx) = mpsc::channel();
         let worker_stats = Arc::clone(&stats);
@@ -1505,8 +1522,51 @@ fn track_info(params: &AudioCodecParameters) -> TrackInfo {
     )
 }
 
-/// Reads an audio file, or the sound of an MP4, MOV or M4V file.
+/// How many audio tracks of one file the player tries, at most.
+const MAX_AUDIO_TRACKS: u8 = 8;
+
+/// Opens the first audio track that plays. `open(n)` opens the audio track
+/// `n` of the file, counted from 0, and its error says how many audio tracks
+/// the file has. A track that fails does not end the search: the next one is
+/// tried, up to [`MAX_AUDIO_TRACKS`]. When none plays, the error of the first
+/// track comes back, with the count of the tracks that were tried. A file
+/// with one audio track gives the result of that track, unchanged.
+fn first_playable_track(
+    open: impl Fn(u8) -> Result<AudioSource, AudioOpenError>,
+) -> Result<AudioSource, AudioOpenError> {
+    let first = match open(0) {
+        Ok(source) => return Ok(source),
+        Err(err) => err,
+    };
+    let tracks = first.tracks;
+    let tried = tracks.min(MAX_AUDIO_TRACKS);
+    for nth in 1..tried {
+        if let Ok(mut source) = open(nth) {
+            source.audio_track = nth + 1;
+            cordiale_core::persistence::log_line(&format!(
+                "audio track {} of {tracks} opened: the first audio track could not be opened ({})",
+                nth + 1,
+                first.reason_key()
+            ));
+            return Ok(source);
+        }
+    }
+    Err(first.with_tracks(usize::from(tried)))
+}
+
+/// Reads an audio file, or the sound of an MP4, MOV or M4V file. An MP4 with
+/// several audio tracks gives the first track that plays.
 fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, AudioOpenError> {
+    first_playable_track(|nth| symphonia_track(bytes, extension, nth))
+}
+
+/// Reads the audio track number `nth` of a file, counted from 0 among the
+/// tracks that have an audio codec.
+fn symphonia_track(
+    bytes: &Arc<[u8]>,
+    extension: &str,
+    nth: u8,
+) -> Result<AudioSource, AudioOpenError> {
     let stream =
         MediaSourceStream::new(Box::new(Cursor::new(Arc::clone(bytes))), Default::default());
     let mut hint = Hint::new();
@@ -1521,15 +1581,20 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
             MetadataOptions::default(),
         )
         .map_err(|err| AudioOpenError::probe(err.to_string()))?;
-    let (track_id, params, delay, num_frames) = reader
+    let candidates: Vec<_> = reader
         .tracks()
         .iter()
-        .find_map(|track| match &track.codec_params {
+        .filter_map(|track| match &track.codec_params {
             Some(CodecParameters::Audio(params)) if params.codec != CODEC_ID_NULL_AUDIO => {
                 Some((track.id, params.clone(), track.delay, track.num_frames))
             }
             _ => None,
         })
+        .collect();
+    let tracks = candidates.len();
+    let (track_id, params, delay, num_frames) = candidates
+        .into_iter()
+        .nth(usize::from(nth))
         .ok_or_else(AudioOpenError::no_track)?;
     let track = track_info(&params);
     let mut source = if params.codec == CODEC_ID_OPUS {
@@ -1540,8 +1605,10 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
         let mut source = AudioSource {
             packets: Packets::Format { reader, track_id },
             track_id,
-            decode: opus_decoder(channels)
-                .map_err(|err| AudioOpenError::decoder(track.clone(), false, err))?,
+            audio_track: 1,
+            decode: opus_decoder(channels).map_err(|err| {
+                AudioOpenError::decoder(track.clone(), false, err).with_tracks(tracks)
+            })?,
             channels: channels.clamp(1, 2) as u16,
             rate: OPUS_RATE,
             pending: Vec::new(),
@@ -1561,6 +1628,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
                     matches!(err, SymphoniaError::Unsupported(_)),
                     err.to_string(),
                 )
+                .with_tracks(tracks)
             })?;
         let total = match (num_frames, params.sample_rate) {
             (Some(frames), Some(hz)) if hz > 0 => {
@@ -1571,6 +1639,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
         AudioSource {
             packets: Packets::Format { reader, track_id },
             track_id,
+            audio_track: 1,
             decode: Decode::Symphonia(decoder),
             channels: params
                 .channels
@@ -1586,18 +1655,25 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, A
     };
     // Decode the first packet: the real channel count and rate come with it.
     if !source.refill() {
-        return Err(AudioOpenError::first_packet(track));
+        return Err(AudioOpenError::first_packet(track).with_tracks(tracks));
     }
     Ok(source)
 }
 
 /// The sound of an MP4 file, read by symphonia 0.5: the AAC-LC layer of an
-/// HE-AAC track plays here, where 0.6 refuses the track.
+/// HE-AAC track plays here, where 0.6 refuses the track. It gives the first
+/// audio track that plays, like [`symphonia_source`].
 fn symphonia05_source(bytes: &Arc<[u8]>) -> Result<AudioSource, AudioOpenError> {
-    let opened = media_audio_v05::open(bytes)?;
+    first_playable_track(|nth| symphonia05_track(bytes, nth))
+}
+
+/// Reads the audio track number `nth` of an MP4 file with symphonia 0.5.
+fn symphonia05_track(bytes: &Arc<[u8]>, nth: u8) -> Result<AudioSource, AudioOpenError> {
+    let opened = media_audio_v05::open(bytes, nth)?;
     let mut source = AudioSource {
         packets: Packets::V05(opened.packets),
         track_id: opened.track_id,
+        audio_track: 1,
         decode: Decode::V05(opened.decoder),
         channels: opened.channels,
         rate: opened.rate,
@@ -1609,7 +1685,7 @@ fn symphonia05_source(bytes: &Arc<[u8]>) -> Result<AudioSource, AudioOpenError> 
     };
     // Decode the first packet: the real channel count and rate come with it.
     if !source.refill() {
-        return Err(AudioOpenError::first_packet(opened.track));
+        return Err(AudioOpenError::first_packet(opened.track).with_tracks(opened.tracks));
     }
     Ok(source)
 }
@@ -1675,6 +1751,7 @@ fn vorbis_source(
             next: 0,
         },
         track_id: 0,
+        audio_track: 1,
         decode: Decode::Symphonia(decoder),
         channels: track.channels.min(usize::from(u16::MAX)) as u16,
         rate: track.sample_rate,
@@ -2525,6 +2602,7 @@ fn open_video(bytes: &Arc<[u8]>, extension: &str) -> Result<VideoOpened, String>
                     next: 0,
                 },
                 track_id: 0,
+                audio_track: 1,
                 decode: opus_decoder(channels).ok()?,
                 channels: channels as u16,
                 rate: OPUS_RATE,
@@ -3030,6 +3108,12 @@ mod tests {
     /// Object type 5 (SBR), 24000 Hz, 2 channels, extension rate 48000 Hz,
     /// underlying type 2 (AAC-LC), three zero flags, padded to 5 bytes.
     const EXPLICIT_SBR_CONFIG: [u8; 5] = [0x2B, 0x11, 0x88, 0x00, 0x00];
+    /// Track 1 is AC-3 (no decoder), track 2 is AAC-LC stereo.
+    const TWO_AC3_THEN_AAC: &[u8] = include_bytes!("../test-data/two_audio_ac3_then_aac.mp4");
+    /// Track 1 is AAC-LC 5.1 (no decoder), track 2 is AAC-LC stereo.
+    const TWO_51_THEN_STEREO: &[u8] = include_bytes!("../test-data/two_audio_51_then_stereo.m4a");
+    /// Track 1 is AC-3 and track 2 is AAC-LC 5.1: no decoder plays either.
+    const TWO_UNPLAYABLE: &[u8] = include_bytes!("../test-data/two_audio_unplayable.mp4");
 
     fn bytes_of(data: &'static [u8]) -> Arc<[u8]> {
         Arc::from(data)
@@ -3175,6 +3259,111 @@ mod tests {
         let samples: Vec<Sample> = source.collect();
         assert!(samples.len() >= 80_000, "{} samples", samples.len());
         assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+    }
+
+    /// Checks a source that plays the stereo tone of the second audio track
+    /// of one of the two-track files; `track` is the number it must report.
+    fn assert_stereo_tone(source: AudioSource, track: u8) {
+        assert_eq!(source.audio_track, track);
+        assert_eq!(source.channels, 2);
+        assert_eq!(source.rate, 44_100);
+        let samples: Vec<Sample> = source.collect();
+        assert!(samples.len() >= 10_000, "{} samples", samples.len());
+        assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+    }
+
+    #[test]
+    fn the_main_reader_goes_on_to_the_next_audio_track() {
+        let ac3 = symphonia_source(&bytes_of(TWO_AC3_THEN_AAC), "mp4").expect("track 2 plays");
+        assert_stereo_tone(ac3, 2);
+        let six = symphonia_source(&bytes_of(TWO_51_THEN_STEREO), "m4a").expect("track 2 plays");
+        assert_stereo_tone(six, 2);
+    }
+
+    #[test]
+    fn the_combined_reader_goes_on_to_the_next_audio_track() {
+        let ac3 = audio_source(&bytes_of(TWO_AC3_THEN_AAC), "mp4").expect("track 2 plays");
+        assert_stereo_tone(ac3, 2);
+        let six = audio_source(&bytes_of(TWO_51_THEN_STEREO), "m4a").expect("track 2 plays");
+        assert_stereo_tone(six, 2);
+    }
+
+    #[test]
+    fn the_fallback_reader_goes_on_to_the_next_audio_track() {
+        for data in [TWO_AC3_THEN_AAC, TWO_51_THEN_STEREO] {
+            let source = symphonia05_source(&bytes_of(data)).expect("a track plays");
+            // The number depends on the tracks that the 0.5 reader lists.
+            assert_eq!(source.channels, 2);
+            assert_eq!(source.rate, 44_100);
+            let samples: Vec<Sample> = source.collect();
+            assert!(peak(&samples) > 0.05, "peak {}", peak(&samples));
+        }
+    }
+
+    #[test]
+    fn a_file_where_no_audio_track_plays_gives_the_error_of_the_first_track() {
+        let bytes = bytes_of(TWO_UNPLAYABLE);
+        assert!(symphonia05_source(&bytes).is_err());
+        let main = symphonia_source(&bytes, "mp4").err().expect("an error");
+        assert_eq!(main.tracks, 2);
+        let error = open_error(&bytes, "mp4");
+        assert_eq!(error.stage, OpenStage::Decoder);
+        assert_eq!(error.reason_key(), "unsupported_codec");
+        assert_eq!(error.track.codec.as_deref(), Some("AC-3"));
+        assert_eq!(error.tracks, 2);
+        assert!(error.fallback.is_some());
+        let text = error.describe();
+        assert!(text.contains("AC-3"), "{text}");
+        assert!(text.contains("2 audio tracks tried"), "{text}");
+    }
+
+    #[test]
+    fn a_file_with_one_audio_track_is_read_as_before() {
+        let bytes = bytes_of(AAC_STEREO);
+        let source = symphonia_source(&bytes, "m4a").expect("an AAC source");
+        assert_eq!(source.audio_track, 1);
+        let fallback = symphonia05_source(&bytes).expect("an AAC source");
+        assert_eq!(fallback.audio_track, 1);
+        let error = open_error(&bytes_of(AAC_51), "m4a");
+        assert_eq!(error.tracks, 1);
+        assert!(!error.describe().contains("tried"));
+        let error = open_error(&bytes_of(AC3), "mp4");
+        assert_eq!(error.tracks, 1);
+        assert!(!error.describe().contains("tried"));
+    }
+
+    #[test]
+    fn at_most_eight_audio_tracks_are_tried() {
+        let calls = std::cell::Cell::new(0u8);
+        let result = first_playable_track(|_| {
+            calls.set(calls.get() + 1);
+            Err(AudioOpenError::first_packet(TrackInfo::default()).with_tracks(20))
+        });
+        let error = result.err().expect("an error");
+        assert_eq!(calls.get(), 8);
+        assert_eq!(error.tracks, 8);
+        // A file with one audio track is tried once.
+        calls.set(0);
+        let result = first_playable_track(|_| {
+            calls.set(calls.get() + 1);
+            Err(AudioOpenError::first_packet(TrackInfo::default()).with_tracks(1))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn the_stats_name_the_track_only_after_the_first() {
+        let first = symphonia_source(&bytes_of(AAC_STEREO), "m4a").expect("a source");
+        assert_eq!(BufferedAudio::new(first).stats().track, 1);
+        let second = symphonia_source(&bytes_of(TWO_AC3_THEN_AAC), "mp4").expect("a source");
+        let stats = BufferedAudio::new(second).stats();
+        assert_eq!(stats.track, 2);
+        let line = playback_summary(None, Some(&stats), AUDIO_PLAYING);
+        assert!(
+            line.contains(" audio_path=main audio_track=2 audio_peak="),
+            "{line}"
+        );
     }
 
     fn crc8(data: &[u8]) -> u8 {
@@ -3847,6 +4036,25 @@ mod tests {
             ),
             "media playback: audio=playing audio_underruns=0 audio_path=fallback \
              audio_peak=0.000 audio_samples=0"
+        );
+        // The number of the audio track shows only after the first track.
+        assert_eq!(
+            playback_summary(
+                None,
+                Some(&AudioStats::with_path("main").with_track(1)),
+                AUDIO_PLAYING
+            ),
+            "media playback: audio=playing audio_underruns=0 audio_path=main \
+             audio_peak=0.000 audio_samples=0"
+        );
+        assert_eq!(
+            playback_summary(
+                None,
+                Some(&AudioStats::with_path("fallback").with_track(2)),
+                AUDIO_PLAYING
+            ),
+            "media playback: audio=playing audio_underruns=0 audio_path=fallback \
+             audio_track=2 audio_peak=0.000 audio_samples=0"
         );
         // A sound that ended on an error says why, at the end of the line.
         let ended = AudioStats::with_path("main");

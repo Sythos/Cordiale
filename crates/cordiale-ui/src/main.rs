@@ -1964,7 +1964,7 @@ async fn run_worker(
     let volume = persistence::load_settings()
         .unwrap_or_default()
         .radio_volume;
-    radio.set_volume(f32::from(volume) / 100.0);
+    radio.set_volume(audio_output::radio_gain(volume));
     let mut radio_state = RadioState::default();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
     let tick_tx = worker_self.clone();
@@ -2279,7 +2279,8 @@ async fn run_worker(
                         push_radio_now(&ui, &radio_state);
                     }
                     Some(WorkerCommand::RadioVolume(volume)) => {
-                        radio.set_volume(volume.clamp(0, 100) as f32 / 100.0);
+                        let percent = u8::try_from(volume.clamp(0, 100)).unwrap_or(100);
+                        radio.set_volume(audio_output::radio_gain(percent));
                     }
                     Some(WorkerCommand::AudioOutputChanged) => {
                         radio.reopen_output();

@@ -13,13 +13,33 @@ La decodifica hardware è opzionale (`media_hw.rs`, feature `hw-decode`).
   con SBR dichiarato nella configurazione, il lettore riprova con symphonia
   0.5 (`media_audio_v05.rs`): la 0.5 legge l'AAC come AAC-LC e suona lo strato
   di base, con meno banda ma con suono. Restano muti i file con più di 2
-  canali, con AC-3, E-AC-3 o ALAC e con più di una voce `stsd`. Un errore
+  canali, con AC-3, E-AC-3 o ALAC e con più di una voce `stsd`, ma solo se
+  nessuna delle loro tracce audio si apre (vedi sotto). Un errore
   dell'apertura è tipizzato (`media_audio_error.rs`: fase, codec, profilo,
   canali, frequenza e messaggio della libreria) e il registro riporta la
   chiave del motivo: `no_track`, `unsupported_codec`, `too_many_channels`,
   `unsupported_profile`, `probe_failed` o `decode_failed`. Quando suona il
   lettore di riserva, il registro lo dice con «audio opened by the fallback
   reader».
+- **Scelta della traccia audio:** un file può avere più tracce audio. Il
+  lettore le prova in ordine (`first_playable_track`, al massimo 8): prima
+  tutte con symphonia 0.6, poi, solo se nessuna si apre, tutte con la 0.5.
+  Una traccia conta come aperta quando si crea il decodificatore e il primo
+  pacchetto si decodifica. Una traccia che non si apre (per esempio AC-3
+  prima di un AAC, o un AAC 5.1 prima di uno stereo) non ferma la ricerca. Se
+  suona una traccia dopo la prima, il registro scrive una riga `audio track
+  <n> of <m> opened: the first audio track could not be opened (<chiave>)`,
+  con `n` contato da 1 e la chiave del motivo della prima traccia. Se nessuna
+  traccia si apre, l'errore è quello della prima traccia, e quando le tracce
+  provate sono più di una il motivo riporta `<n> audio tracks tried`. Un file
+  con una sola traccia audio si comporta come prima e non scrive righe nuove.
+  Le prove usano i file `two_audio_*` in `crates/cordiale-ui/test-data/`.
+- **Volume:** il cursore del visualizzatore passa da `media_gain` e il volume
+  della radio, salvato come percentuale, da `radio_gain` (`audio_output.rs`):
+  un valore del cursore che non è un numero finito vale 1.0, gli altri
+  restano tra 0.0 e 1.0. Il lettore non ha un comando di silenzio (mute):
+  il volume 0 è il silenzio, e una prova senza dispositivo audio controlla
+  che il lettore di rodio produca campioni a zero.
 - **Video:** il thread del controller decodifica, converte in RGBA e consegna i
   fotogrammi alla finestra. Con una traccia audio, l'audio è l'orologio del
   video; senza audio si usa l'orologio di sistema.
@@ -43,6 +63,9 @@ dell'applicazione:
 media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starved=0 decode_avg=2.1ms decode_max=9.0ms convert_max=4.0ms audio_underruns=0 audio_path=main audio_peak=0.412 audio_samples=1411200
 ```
 
+Quando suona una traccia audio dopo la prima, il campo `audio_track=<n>` segue
+`audio_path=`; con la prima traccia il campo non c'è.
+
 | Campo | Significato |
 |---|---|
 | `decoder` | `software` o il nome del percorso hardware (`VA-API`, `VDPAU`, `D3D11VA`, `DXVA2`, `VideoToolbox`); `(fallback)` se l'hardware si è fermato |
@@ -55,6 +78,7 @@ media playback: audio=playing decoder=software shown=120 late=3 dropped=1 starve
 | `audio` | stato del suono all'apertura: `playing` (suono su un'uscita aperta), `no_output` (il file ha un suono ma nessuna uscita è aperta: parte muto), `no_track` (nessuna traccia audio, o traccia che non si apre) |
 | `audio_underruns` | volte in cui l'uscita audio ha trovato la coda vuota (un vuoto nel suono); l'attesa all'inizio e dopo uno spostamento non conta |
 | `audio_path` | il lettore che decodifica il suono: `main` (symphonia 0.6, Opus) o `fallback` (symphonia 0.5, solo per gli MP4 che la 0.6 rifiuta) |
+| `audio_track` | presente solo se suona una traccia audio dopo la prima: il suo numero, da 2 in su |
 | `audio_peak` | il campione più alto in valore assoluto che il decodificatore ha prodotto, prima del volume, da 0 a 1. `0.000` con `audio_samples` maggiore di zero vuol dire che il file decodifica in silenzio |
 | `audio_samples` | quanti campioni ha prodotto il decodificatore (tutti i canali) |
 | `audio_end` | presente solo se il suono è finito prima della fine del file per un errore: `read error: ...` (il lettore del contenitore), `decode error: ...` (il decodificatore) o `the decode worker stopped` (il thread di decodifica si è fermato). La stessa causa è nella riga `audio ended early` |
@@ -71,6 +95,7 @@ Le righe del registro sul suono, in ordine di apertura:
 | `video audio track could not be opened: <motivo>` | il video ha una traccia audio che non si apre; il motivo porta la chiave `[unsupported_codec]`, `[too_many_channels]`... |
 | `audio file could not be opened: <motivo>` | lo stesso per un file audio |
 | `audio opened by the fallback reader: <motivo>` | la 0.6 ha rifiutato la traccia e la 0.5 la suona |
+| `audio track <n> of <m> opened: the first audio track could not be opened (<chiave>)` | il file ha più tracce audio e suona una traccia dopo la prima; compare per il lettore che la apre |
 | `audio ended early: <motivo>` | il suono è finito per un errore, una volta per file |
 | `media playback: audio=...` | il riepilogo alla chiusura del file (sopra) |
 
