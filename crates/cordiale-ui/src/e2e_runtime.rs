@@ -3165,6 +3165,7 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
     // A copy from a device that the own list does not know yet waits: the
     // own list is read again, then the row is read once more.
     let mut keys_read = false;
+    let mut stored = false;
     for _ in 0..2 {
         match engine
             .handle_event(&client, &token, protocol, row, e2e_now())
@@ -3182,6 +3183,7 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
             }
             Ok(outcome) => {
                 keys_read = outcome == RowOutcome::KeysRead;
+                stored = outcome == RowOutcome::Stored;
                 break;
             }
             Err(error) => {
@@ -3192,6 +3194,13 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
         }
     }
     settle_engine(state, ui, &row.network, engine).await;
+    // Only a new text of a peer sounds: not a copy of an own text, a
+    // repeated row, a KEYS row or a list message. The text stays in the
+    // engine, so the sound reads no mention from it.
+    if stored && !row.own && row.channel.is_none() {
+        let key = (row.network.clone(), row.from.clone());
+        play_sound_for_sender(state, &key, &row.from, "", true);
+    }
     if keys_read {
         resync_e2e_channels(state, ui, &row.network, false).await;
     }
