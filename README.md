@@ -226,6 +226,14 @@ Cordiale also covers:
   muted conversation shows a bar above the compose box with the time it was
   muted at (when this device did it) and the time left, plus a button to
   unmute it right away.
+- **Sounds on this computer:** Settings > Notifications has a section that
+  plays one of five bundled public-domain sounds (or none) for a direct
+  message and for a mention, with a preview button and a volume slider. The
+  sound plays only for a live line in a window that is not in view (not
+  selected, or Cordiale has no focus), never for history or catch-up, your
+  own lines or a muted conversation, and at most once in two seconds. The
+  default is silence. The choices stay in the local settings and do not
+  change the Grappa sound above.
 - **Uploads and attachments:** the paperclip uploads a picked file through
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
