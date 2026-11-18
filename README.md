@@ -249,8 +249,9 @@ Cordiale also covers:
   MP3, Ogg Vorbis and Opus (also from older iOS devices), FLAC, WAV, AAC and
   M4A with play, pause, seek and volume; MP4, MOV and M4V video with H.264 or
   HEVC/H.265, and WebM video with VP8, VP9 or AV1 and Opus or Vorbis sound.
-  A file that can't be decoded shows an error message. Other links open in
-  the browser.
+  A file that can't be decoded shows an error message. A video whose sound
+  can't play (for example AC-3, or more than 2 channels) plays without it
+  and says so in a note under the controls. Other links open in the browser.
   Channel-topic links above the chat and in the Channels list open in the
   browser, with keyboard access too. Only the link activates the browser;
   clicking other text in a Channels row still joins or opens that channel.

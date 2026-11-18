@@ -2589,6 +2589,12 @@ export component AppWindow inherits Window {
     in property <string> media-title: "";
     in property <string> media-kind: "";
     in property <string> media-error: "";
+    // Why the sound of the file cannot play: "", "unsupported_codec",
+    // "too_many_channels", "unsupported_profile", "probe_failed",
+    // "decode_failed" or "no_output". `media-audio-note-detail` fills the
+    // sentence: a codec, a profile or a channel count.
+    in property <string> media-audio-note: "";
+    in property <string> media-audio-note-detail: "";
     in property <image> media-image;
     in property <string> media-text: "";
     in property <bool> media-truncated: false;
@@ -10329,8 +10335,16 @@ export component AppWindow inherits Window {
             text: @tr("This file is no longer on the server.");
             wrap: word-wrap;
         }
-        if media-kind == "failed" : Text {
+        if media-kind == "failed" && media-audio-note == "" : Text {
             text: @tr("The file couldn't be shown ({}).", media-error);
+            wrap: word-wrap;
+        }
+        if media-kind == "failed" && media-audio-note != "" : Text {
+            text: media-audio-note == "too_many_channels"
+                ? @tr("This sound has more than 2 channels ({} channels). Cordiale cannot play it.", media-audio-note-detail)
+                : media-audio-note == "probe_failed" || media-audio-note == "decode_failed"
+                ? @tr("The sound file could not be opened.")
+                : @tr("This sound file uses a format that Cordiale cannot play ({}).", media-audio-note-detail);
             wrap: word-wrap;
         }
         if media-kind == "audio" : Text {
@@ -10431,6 +10445,18 @@ export component AppWindow inherits Window {
                     media-volume-changed(value);
                 }
             }
+        }
+        if media-kind == "video" && media-audio-note != "" : Text {
+            text: media-audio-note == "no_output"
+                ? @tr("No audio output is open. The video plays without sound.")
+                : media-audio-note == "too_many_channels"
+                ? @tr("This video has sound with more than 2 channels ({} channels). Cordiale cannot play it. The picture plays without sound.", media-audio-note-detail)
+                : media-audio-note == "probe_failed" || media-audio-note == "decode_failed"
+                ? @tr("The sound of this video could not be opened. The picture plays without sound.")
+                : @tr("This video has sound that Cordiale cannot play ({}). The picture plays without sound.", media-audio-note-detail);
+            wrap: word-wrap;
+            color: palette-muted;
+            vertical-stretch: 0;
         }
         if media-kind == "image" && !media-zoom : Image {
             source: media-image;

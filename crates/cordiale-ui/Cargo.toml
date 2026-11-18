@@ -58,6 +58,9 @@ rodio = { version = "0.23", default-features = false, features = ["playback", "m
 # Opus, H.264, HEVC/H.265, VP8, VP9 and AV1 from their own decoders. SVG is drawn by resvg,
 # which runs no script and gets no external resolver.
 symphonia = { version = "0.6", default-features = false, features = ["isomp4", "ogg", "mp3", "vorbis", "flac", "wav", "pcm", "aac"] }
+# The fallback decodes MP4 audio that 0.6 refuses, such as HE-AAC: the 0.5
+# series reads it as AAC-LC.
+symphonia05 = { package = "symphonia", version = "0.5.5", default-features = false, features = ["isomp4", "aac"] }
 opus-decoder = "0.1"
 rusty_h265 = "0.7"
 rusty_vp9 = "0.2"

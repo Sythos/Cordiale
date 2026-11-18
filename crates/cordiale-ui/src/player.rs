@@ -125,6 +125,7 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 match crate::audio_output::open_selected_sink() {
                     Ok(sink) => {
                         stop_current(&mut current, &gate);
+                        crate::audio_output::log_opened(&sink);
                         device = Some(sink);
                         stale = false;
                     }
@@ -166,6 +167,7 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 if device.is_none() || stale {
                     match crate::audio_output::open_selected_sink() {
                         Ok(sink) => {
+                            crate::audio_output::log_opened(&sink);
                             device = Some(sink);
                             stale = false;
                         }
