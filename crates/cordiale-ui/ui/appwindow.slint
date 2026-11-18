@@ -1496,10 +1496,13 @@ export component AppWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 600px;
     // On the connected screen the two side columns and the chat keep their
-    // minimums, so no control leaves its column. Other screens set none.
+    // minimums, so no control leaves its column. Other screens keep a safe
+    // floor, so the window never collapses to a title-bar strip. The floor
+    // matches `MIN_WINDOW_WIDTH` and `MIN_WINDOW_HEIGHT` in `window_state.rs`.
     min-width: screen == "connected"
-        ? sidebar-min-width + members-min-width + chat-min-width + layout-fixed-width
-        : 0px;
+        ? max(480px, sidebar-min-width + members-min-width + chat-min-width + layout-fixed-width)
+        : 480px;
+    min-height: 320px;
 
     // Without this, std-widgets (Button/LineEdit/CheckBox/ListView/...)
     // silently follow the OS's own dark/light setting, independent of
