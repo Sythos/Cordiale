@@ -4262,3 +4262,27 @@ msgstr "Le son de cette vidéo n'a pas pu être ouvert. L'image est lue sans son
 msgctxt "AppWindow"
 msgid "This video has sound that Cordiale cannot play ({}). The picture plays without sound."
 msgstr "Cette vidéo a un son que Cordiale ne peut pas lire ({}). L'image est lue sans son."
+
+msgctxt "TopicText"
+msgid "Open this link"
+msgstr "Ouvrir ce lien"
+
+msgctxt "AppWindow"
+msgid "Copy text"
+msgstr "Copier le texte"
+
+msgctxt "AppWindow"
+msgid "Copy text — {}"
+msgstr "Copier le texte — {}"
+
+msgctxt "AppWindow"
+msgid "Select text from the loaded messages, then copy it. This view is read-only."
+msgstr "Sélectionne le texte des messages chargés, puis copie-le. Cette vue est en lecture seule."
+
+msgctxt "AppWindow"
+msgid "Select all"
+msgstr "Tout sélectionner"
+
+msgctxt "AppWindow"
+msgid "Loaded chat messages"
+msgstr "Messages du chat chargés"
