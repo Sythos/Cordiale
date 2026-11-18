@@ -124,6 +124,8 @@ pub struct Opened {
     pub rate: u32,
     pub total: Option<Duration>,
     pub track: TrackInfo,
+    /// How many audio tracks the file has that this reader knows.
+    pub tracks: usize,
 }
 
 /// The readable name of a codec.
@@ -153,8 +155,9 @@ fn track_info(params: &CodecParameters) -> TrackInfo {
     )
 }
 
-/// Reads the MP4 file and makes the decoder of its first audio track.
-pub fn open(bytes: &Arc<[u8]>) -> Result<Opened, AudioOpenError> {
+/// Reads the MP4 file and makes the decoder of its audio track number `nth`,
+/// counted from 0 among the tracks that have a codec.
+pub fn open(bytes: &Arc<[u8]>, nth: u8) -> Result<Opened, AudioOpenError> {
     let stream =
         MediaSourceStream::new(Box::new(Cursor::new(Arc::clone(bytes))), Default::default());
     let mut hint = Hint::new();
@@ -169,11 +172,16 @@ pub fn open(bytes: &Arc<[u8]>) -> Result<Opened, AudioOpenError> {
         .map_err(|err| AudioOpenError::probe(err.to_string()))?;
     let reader = probed.format;
     // A track without a codec is a video, subtitle or unknown track.
-    let (track_id, params) = reader
+    let candidates: Vec<(u32, CodecParameters)> = reader
         .tracks()
         .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
         .map(|track| (track.id, track.codec_params.clone()))
+        .collect();
+    let tracks = candidates.len();
+    let (track_id, params) = candidates
+        .into_iter()
+        .nth(usize::from(nth))
         .ok_or_else(AudioOpenError::no_track)?;
     let track = track_info(&params);
     let decoder = symphonia05::default::get_codecs()
@@ -184,6 +192,7 @@ pub fn open(bytes: &Arc<[u8]>) -> Result<Opened, AudioOpenError> {
                 matches!(err, Error::Unsupported(_)),
                 err.to_string(),
             )
+            .with_tracks(tracks)
         })?;
     let time_base = params
         .time_base
@@ -207,5 +216,6 @@ pub fn open(bytes: &Arc<[u8]>) -> Result<Opened, AudioOpenError> {
         rate: params.sample_rate.unwrap_or(44_100),
         total,
         track,
+        tracks,
     })
 }
