@@ -42,8 +42,8 @@ use crate::AppWindow;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
 
 /// The window never restores smaller than this (logical pixels).
-const MIN_WINDOW_WIDTH: u32 = 320;
-const MIN_WINDOW_HEIGHT: u32 = 240;
+const MIN_WINDOW_WIDTH: u32 = 480;
+const MIN_WINDOW_HEIGHT: u32 = 320;
 /// Size assumed for the visibility check when no size was saved.
 const DEFAULT_WINDOW_WIDTH: u32 = 900;
 const DEFAULT_WINDOW_HEIGHT: u32 = 600;
@@ -177,14 +177,19 @@ pub fn plan(
             )
         })
         .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h));
+    let (max_width, max_height) = largest.unwrap_or((u32::MAX, u32::MAX));
+    let fit = |width: u32, height: u32| {
+        (
+            width.clamp(MIN_WINDOW_WIDTH, max_width.max(MIN_WINDOW_WIDTH)),
+            height.clamp(MIN_WINDOW_HEIGHT, max_height.max(MIN_WINDOW_HEIGHT)),
+        )
+    };
+    // A maximized or full-screen window always gets valid normal bounds, so
+    // leaving that state never falls back to a host default.
+    let special = state.maximized || state.fullscreen;
     let size = match (state.width, state.height) {
-        (Some(width), Some(height)) => {
-            let (max_width, max_height) = largest.unwrap_or((u32::MAX, u32::MAX));
-            Some((
-                width.clamp(MIN_WINDOW_WIDTH, max_width.max(MIN_WINDOW_WIDTH)),
-                height.clamp(MIN_WINDOW_HEIGHT, max_height.max(MIN_WINDOW_HEIGHT)),
-            ))
-        }
+        (Some(width), Some(height)) => Some(fit(width, height)),
+        _ if special => Some(fit(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)),
         _ => None,
     };
     let (shown_width, shown_height) = size.unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
@@ -215,11 +220,28 @@ pub fn plan(
     RestorePlan {
         size,
         position,
-        maximized: state.maximized,
+        // The two states stay distinct: full-screen wins over maximized.
+        maximized: state.maximized && !state.fullscreen,
         fullscreen: state.fullscreen,
         sidebar_width,
         members_width,
     }
+}
+
+/// Size to apply when a window that is neither maximized nor full-screen is
+/// smaller than the minimum (for example a title-bar-only strip after leaving
+/// full-screen on Windows). It is the last valid normal size or the default.
+pub fn repair_size(sample: &Sample, saved: Option<WindowState>) -> Option<(u32, u32)> {
+    if sample.maximized || sample.fullscreen {
+        return None;
+    }
+    if sample.size.0 >= MIN_WINDOW_WIDTH && sample.size.1 >= MIN_WINDOW_HEIGHT {
+        return None;
+    }
+    let size = saved
+        .and_then(|state| state.width.zip(state.height))
+        .filter(|(w, h)| *w >= MIN_WINDOW_WIDTH && *h >= MIN_WINDOW_HEIGHT);
+    Some(size.unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)))
 }
 
 /// Decides when a sampled state is written: once it is stable (equal to the
@@ -333,10 +355,10 @@ fn restore(ui: &AppWindow, state: &WindowState) {
     if let Some((x, y)) = plan.position {
         window.set_position(slint::PhysicalPosition::new(x, y));
     }
+    // Normal bounds are set above; now enter exactly one special state.
     if plan.fullscreen {
         window.set_fullscreen(true);
-    }
-    if plan.maximized {
+    } else if plan.maximized {
         window.set_maximized(true);
     }
     if let Some(width) = plan.sidebar_width {
@@ -370,6 +392,10 @@ pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> WindowStateSaver {
             return;
         };
         let mut gate = timer_gate.borrow_mut();
+        if let Some((width, height)) = repair_size(&sample, gate.latest()) {
+            ui.window()
+                .set_size(slint::LogicalSize::new(width as f32, height as f32));
+        }
         let state = record(gate.latest(), &sample);
         if gate.observe(state) {
             write(state);
@@ -520,9 +546,41 @@ mod tests {
             ..WindowState::default()
         };
         let plan = plan(&state, &[monitor(0, 0, 1920, 1080)], 1.0, true);
-        assert!(plan.maximized && plan.fullscreen);
-        assert_eq!(plan.size, None);
+        // Full-screen wins; the normal size is the safe default.
+        assert!(!plan.maximized && plan.fullscreen);
+        assert_eq!(plan.size, Some((900, 600)));
         assert_eq!(plan.position, None);
+        let maximized = WindowState {
+            maximized: true,
+            ..WindowState::default()
+        };
+        let plan = super::plan(&maximized, &[monitor(0, 0, 1920, 1080)], 1.0, true);
+        assert!(plan.maximized && !plan.fullscreen);
+    }
+
+    #[test]
+    fn plan_default_size_fits_a_small_monitor() {
+        let state = WindowState {
+            fullscreen: true,
+            ..WindowState::default()
+        };
+        let plan = plan(&state, &[monitor(0, 0, 800, 500)], 1.0, true);
+        assert_eq!(plan.size, Some((800, 500)));
+    }
+
+    #[test]
+    fn repair_size_fixes_a_collapsed_normal_window() {
+        let saved = record(None, &sample(false, false));
+        let mut strip = sample(false, false);
+        strip.size = (1000, 39);
+        assert_eq!(repair_size(&strip, Some(saved)), Some((1000, 700)));
+        assert_eq!(repair_size(&strip, None), Some((900, 600)));
+        assert_eq!(repair_size(&sample(false, false), Some(saved)), None);
+        strip.fullscreen = true;
+        assert_eq!(repair_size(&strip, Some(saved)), None);
+        strip.fullscreen = false;
+        strip.maximized = true;
+        assert_eq!(repair_size(&strip, Some(saved)), None);
     }
 
     #[test]
