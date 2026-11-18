@@ -2497,6 +2497,7 @@ pub(crate) fn append_query_live_message(
 /// message (`direct`) or a mention in a channel. Only the live paths call
 /// it, never history pages or catch-up. The server drops the lines of an
 /// ignored sender before they reach the client, so `ignored` is never set.
+/// The mention check uses the own nick of the network of the line.
 /// Nothing here writes message text, nicks or window names to the log.
 pub(crate) fn play_live_sound(
     state: &WorkerState,
@@ -2516,8 +2517,8 @@ pub(crate) fn play_live_sound(
     let kind = if direct {
         notification_sound::EventKind::DirectMessage
     } else {
-        refresh_mention_context(state);
-        if !is_mention(&message.text, message.nick.as_deref(), &mention_context()) {
+        let context = mention_context_for(state, &key.0);
+        if !is_mention(&message.text, message.nick.as_deref(), &context) {
             return;
         }
         notification_sound::EventKind::Mention

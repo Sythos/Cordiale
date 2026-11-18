@@ -9967,6 +9967,15 @@ struct MentionContext {
 static MENTION_CONTEXT: std::sync::RwLock<Option<MentionContext>> = std::sync::RwLock::new(None);
 static BOLD_MENTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// The mention check for one network: its own nick and the watch patterns.
+/// It does not touch the shared context of the open window.
+fn mention_context_for(state: &WorkerState, network: &str) -> MentionContext {
+    MentionContext {
+        own_nick: state.networks.own_nicks.get(network).cloned(),
+        patterns: state.prefs.watch_patterns.clone(),
+    }
+}
+
 /// Points the mention check at the open window's network.
 fn refresh_mention_context(state: &WorkerState) {
     let own_nick = state
