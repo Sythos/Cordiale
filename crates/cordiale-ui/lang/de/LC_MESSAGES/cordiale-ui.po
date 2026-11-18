@@ -4314,3 +4314,27 @@ msgstr "Lautstärke dieser Töne: {} %"
 msgctxt "AppWindow"
 msgid "Volume of these sounds"
 msgstr "Lautstärke dieser Töne"
+
+msgctxt "TopicText"
+msgid "Open this link"
+msgstr "Diesen Link öffnen"
+
+msgctxt "AppWindow"
+msgid "Copy text"
+msgstr "Text kopieren"
+
+msgctxt "AppWindow"
+msgid "Copy text — {}"
+msgstr "Text kopieren — {}"
+
+msgctxt "AppWindow"
+msgid "Select text from the loaded messages, then copy it. This view is read-only."
+msgstr "Wähle Text aus den geladenen Nachrichten aus und kopiere ihn. Diese Ansicht ist schreibgeschützt."
+
+msgctxt "AppWindow"
+msgid "Select all"
+msgstr "Alles auswählen"
+
+msgctxt "AppWindow"
+msgid "Loaded chat messages"
+msgstr "Geladene Chat-Nachrichten"
