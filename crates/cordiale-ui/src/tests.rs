@@ -18871,12 +18871,25 @@ fn typing_continues_after_each_send_path_in_every_compose_context() {
         key("]".into());
         assert_eq!(ui.get_compose_text(), "x]", "{name}: typing after Enter");
 
+        // Keep the sent bodies. Each typed key also queues a draft update.
+        let mut sent: Vec<String> = Vec::new();
+        let mut drain = |sent: &mut Vec<String>| {
+            while let Ok(command) = worker_rx.try_recv() {
+                if let WorkerCommand::SendMessage { body } = command {
+                    sent.push(body);
+                }
+            }
+        };
+        drain(&mut sent);
+        assert_eq!(sent, vec!["a]b[};'\\c]d".to_string()], "{name}: Enter body");
+
         // Path 2: a click on the Send button. The button sits at the right
-        // end of the compose bar: scan the bar from its middle until the
-        // click sends the text.
+        // end of the compose bar, left of the members column. Scan that
+        // part of the bar. Only a queued message proves a send: a click on
+        // the field can change the text without sending it.
         let mut clicked = false;
         'scan: for y in (0..20).map(|row| 796. - row as f32 * 4.) {
-            for x in (300..1100).step_by(4) {
+            for x in (880..1010).step_by(3) {
                 ui.set_compose_text("z".into());
                 let position = slint::LogicalPosition::new(x as f32, y);
                 ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -18887,25 +18900,20 @@ fn typing_continues_after_each_send_path_in_every_compose_context() {
                     position,
                     button: PointerEventButton::Left,
                 });
-                if ui.get_compose_text().is_empty() {
+                drain(&mut sent);
+                if sent.last().map(String::as_str) == Some("z") {
                     clicked = true;
                     break 'scan;
                 }
             }
         }
         assert!(clicked, "{name}: the Send button was not found");
+        assert_eq!(ui.get_compose_text(), "", "{name}: after Send");
         settle();
         key("y".into());
         key("]".into());
         assert_eq!(ui.get_compose_text(), "y]", "{name}: typing after Send");
-
-        // Each typed key also queues a draft update: keep the sent bodies.
-        let sent: Vec<String> = std::iter::from_fn(|| worker_rx.try_recv().ok())
-            .filter_map(|command| match command {
-                WorkerCommand::SendMessage { body } => Some(body),
-                _ => None,
-            })
-            .collect();
+        drain(&mut sent);
         assert_eq!(
             sent,
             vec!["a]b[};'\\c]d".to_string(), "z".to_string()],
