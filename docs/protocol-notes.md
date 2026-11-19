@@ -1241,6 +1241,16 @@ letto in una spec:
   versione) → `POST /auth/login` (o bearer diretto se token già noto) →
   `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
   di nuovo `protocol_version`).
+- `GET /boot` e `GET /me` si ripetono in caso di errore transitorio: 500, 502,
+  503, 504, timeout ed errore di connessione, in 3 tentativi con attese di 2 s
+  e 5 s. Ogni altro stato è definitivo e un 401 con bearer salvato resta
+  `BearerRejected`. Si ripete solo la richiesta fallita con lo stesso token:
+  `POST /auth/login`, TOTP, codice di recupero e share token non si ripetono
+  mai. Ogni tentativo fallito scrive una riga nel log (endpoint, numero del
+  tentativo, stato HTTP, `timeout` o `connect`; mai token né corpo). La UI
+  mostra «Il server è lento» durante l'attesa e, dopo l'ultimo errore, il
+  numero di stato o un testo per il timeout. Il refresh in `frames.rs` non
+  ripete.
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
   ignorare i campi sconosciuti. Per i kind evento, Cordiale gestisce
   tutti i 58 kind dell'inventario upstream attuale; un kind top-level
