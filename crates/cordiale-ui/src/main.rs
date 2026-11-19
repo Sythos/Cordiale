@@ -89,7 +89,8 @@ use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
     bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_recovery_code,
-    bootstrap_with_share_token, bootstrap_with_totp, BootstrapError, BootstrapOutcome,
+    bootstrap_with_share_token, bootstrap_with_totp, set_retry_notice, BootstrapError,
+    BootstrapOutcome, FailureKind,
 };
 use cordiale_core::cleartext;
 use cordiale_core::client::{
@@ -625,6 +626,20 @@ fn main() -> Result<(), slint::PlatformError> {
     symbol_fonts::register_symbol_fonts();
     let ui = AppWindow::new()?;
     debug_info::watch_renderer(ui.window());
+
+    // `/boot` and `/me` run again after a transient failure: tell the user
+    // while the sign-in waits.
+    let retry_ui = Mutex::new(ui.as_weak());
+    set_retry_notice(move || {
+        let weak = retry_ui
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_status_message("".into());
+            ui.set_status_kind("boot-me-retrying".into());
+        });
+    });
 
     // Settings > Credits: Cordiale's own info only, never a list of
     // Grappa/Cicchetto's contributors — explicit project-owner
@@ -14332,8 +14347,21 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
             ui.set_status_kind("reauthentication-required".into());
         }
         BootstrapError::Boot(_) | BootstrapError::Me(_) => {
-            ui.set_status_kind("boot-me-failed".into());
+            let (kind, message) = boot_failure_status(err.boot_failure_kind());
+            ui.set_status_message(message.into());
+            ui.set_status_kind(kind.into());
         }
+    }
+}
+
+/// The status key and the `status-message` text for the last failure of
+/// `/boot` or `/me`: the HTTP status number for a server status, nothing
+/// for the other kinds.
+fn boot_failure_status(kind: Option<FailureKind>) -> (&'static str, String) {
+    match kind {
+        Some(FailureKind::Status(code)) => ("boot-me-server-error", code.to_string()),
+        Some(FailureKind::Timeout) => ("boot-me-timeout", String::new()),
+        _ => ("boot-me-failed", String::new()),
     }
 }
 

@@ -229,6 +229,18 @@ msgid "Signed in, but couldn't load account data."
 msgstr "Connexion réussie, mais impossible de charger les données du compte."
 
 msgctxt "AppWindow"
+msgid "The server is slow. Trying again…"
+msgstr "Le serveur est lent. Nouvelle tentative…"
+
+msgctxt "AppWindow"
+msgid "The server could not load your account data (error {}). Try again in a minute."
+msgstr "Le serveur n'a pas pu charger les données de ton compte (erreur {}). Réessaie dans une minute."
+
+msgctxt "AppWindow"
+msgid "The server did not answer in time. Try again in a minute."
+msgstr "Le serveur n'a pas répondu à temps. Réessaie dans une minute."
+
+msgctxt "AppWindow"
 msgid "Couldn't reach the server. Check the URL and try again."
 msgstr "Impossible de joindre le serveur. Vérifie l'URL et réessaie."
 

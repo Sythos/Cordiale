@@ -19,7 +19,7 @@ prima di pianificare.
 |---|---|---|---|
 | Login username/password | Sì | Fase 1 | `POST /auth/login` |
 | Token per-client come alternativa a TOTP/passkey | Sì | Fase 1 | Stesso campo `password`; scoped, `403 client_token_scope` fuori scope |
-| Bootstrap `/api/config` + `/boot` + `/me` | Sì | Fase 1 | Sequenza di avvio |
+| Bootstrap `/api/config` + `/boot` + `/me` | Sì | Fase 1 | Sequenza di avvio; `/boot` e `/me` si ripetono (3 tentativi) su 5xx, timeout ed errori di connessione, e la UI mostra la causa reale |
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |

@@ -18677,3 +18677,28 @@ fn a_keyboard_page_hides_the_unread_divider() {
     assert_eq!(ui.get_unread_divider_id(), "");
     assert!(ui.get_unread_divider_dismissed());
 }
+
+#[test]
+fn boot_failure_status_maps_the_failure_kind_to_a_status_kind() {
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Status(500))),
+        ("boot-me-server-error", "500".to_string())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Status(503))),
+        ("boot-me-server-error", "503".to_string())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Timeout)),
+        ("boot-me-timeout", String::new())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Connect)),
+        ("boot-me-failed", String::new())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Other)),
+        ("boot-me-failed", String::new())
+    );
+    assert_eq!(boot_failure_status(None), ("boot-me-failed", String::new()));
+}
