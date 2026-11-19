@@ -157,6 +157,38 @@ pub fn set_retry_notice(notice: impl Fn() + Send + Sync + 'static) {
     let _ = RETRY_NOTICE.set(Box::new(notice));
 }
 
+/// A stage of the sign-in that the client can show while it waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapStage {
+    /// The server check and the authentication.
+    SigningIn,
+    /// The `/boot` and `/me` requests.
+    LoadingAccount,
+}
+
+type StageNotice = Box<dyn Fn(BootstrapStage) + Send + Sync>;
+
+static STAGE_NOTICE: OnceLock<StageNotice> = OnceLock::new();
+
+#[cfg(test)]
+tokio::task_local! {
+    static STAGE_SINK: std::cell::RefCell<Vec<BootstrapStage>>;
+}
+
+/// Sets the function that runs when a sign-in stage starts. The first call
+/// wins; a later call does nothing.
+pub fn set_stage_notice(notice: impl Fn(BootstrapStage) + Send + Sync + 'static) {
+    let _ = STAGE_NOTICE.set(Box::new(notice));
+}
+
+fn notify_stage(stage: BootstrapStage) {
+    #[cfg(test)]
+    let _ = STAGE_SINK.try_with(|sink| sink.borrow_mut().push(stage));
+    if let Some(notice) = STAGE_NOTICE.get() {
+        notice(stage);
+    }
+}
+
 /// The log line of one failed attempt. It holds the endpoint, the attempt
 /// number and the failure kind. It never holds a token or a body.
 fn attempt_log_line(endpoint: &str, attempt: usize, total: usize, kind: FailureKind) -> String {
@@ -204,6 +236,7 @@ async fn boot_and_me(
     token: &str,
     saved_bearer: bool,
 ) -> Result<(BootResponse, MeResponse), BootstrapError> {
+    notify_stage(BootstrapStage::LoadingAccount);
     let rejected = |err: &GrappaClientError| {
         saved_bearer && err.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
     };
@@ -231,6 +264,8 @@ async fn boot_and_me(
 async fn check_server_compatibility(
     client: &GrappaClient,
 ) -> Result<ServerCompatibility, BootstrapError> {
+    // Every sign-in starts here, before its first request.
+    notify_stage(BootstrapStage::SigningIn);
     let config = client
         .fetch_config()
         .await
@@ -430,6 +465,73 @@ mod tests {
             .expect("bootstrap");
         assert_eq!(outcome.token, "full");
         assert_eq!(outcome.me.name.as_deref(), Some("vjt"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_reports_its_stages_in_order() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"kind": "user", "name": "vjt"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let stages = STAGE_SINK
+            .scope(std::cell::RefCell::new(Vec::new()), async {
+                bootstrap_with_bearer(&client, "saved")
+                    .await
+                    .expect("bootstrap");
+                STAGE_SINK.with(|sink| sink.take())
+            })
+            .await;
+        assert_eq!(
+            stages,
+            [BootstrapStage::SigningIn, BootstrapStage::LoadingAccount]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_sign_in_never_reaches_the_account_stage() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/totp/verify"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid_two_factor"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let stages = STAGE_SINK
+            .scope(std::cell::RefCell::new(Vec::new()), async {
+                let result = bootstrap_with_totp(&client, "ch", "000000").await;
+                assert!(result.is_err());
+                STAGE_SINK.with(|sink| sink.take())
+            })
+            .await;
+        assert_eq!(stages, [BootstrapStage::SigningIn]);
     }
 
     #[tokio::test]
