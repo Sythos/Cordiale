@@ -18737,10 +18737,14 @@ fn typing_continues_after_a_bracket_and_after_enter() {
     key("\n");
     settle();
     assert_eq!(ui.get_compose_text(), "");
-    assert!(matches!(
-        worker_rx.try_recv(),
-        Ok(WorkerCommand::SendMessage { body }) if body == "a]b[}c"
-    ));
+    // Each typed key also queues a draft update: keep only the sent bodies.
+    let sent: Vec<String> = std::iter::from_fn(|| worker_rx.try_recv().ok())
+        .filter_map(|command| match command {
+            WorkerCommand::SendMessage { body } => Some(body),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, vec!["a]b[}c".to_string()]);
     key("x");
     key("]");
     assert_eq!(ui.get_compose_text(), "x]");
