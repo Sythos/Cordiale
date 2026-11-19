@@ -18680,6 +18680,7 @@ fn a_keyboard_page_hides_the_unread_divider() {
 
 #[test]
 fn sending_a_message_asks_for_the_focus_in_the_compose_field() {
+    set_headless_software_platform();
     let ui = AppWindow::new().unwrap();
     let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
     let history = Rc::new(RefCell::new(input_history::InputHistory::default()));
@@ -18702,6 +18703,7 @@ fn sending_a_message_asks_for_the_focus_in_the_compose_field() {
 #[test]
 fn typing_continues_after_a_bracket_and_after_enter() {
     use slint::platform::WindowEvent;
+    set_headless_software_platform();
     let ui = AppWindow::new().unwrap();
     ui.set_screen("connected".into());
     ui.set_has_selected_channel(true);
