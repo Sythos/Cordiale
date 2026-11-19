@@ -28,9 +28,14 @@
 //! `protocol_version` again) is a separate step, not done here — this
 //! module only covers the REST leg.
 
+use std::future::Future;
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::client::{GrappaClient, GrappaClientError, LoginError};
+use crate::persistence;
 use crate::protocol::ServerCompatibility;
 use crate::rest::{BootResponse, LoginRequest, MeResponse};
 
@@ -73,6 +78,154 @@ pub enum BootstrapError {
     BearerRejected,
     Boot(GrappaClientError),
     Me(GrappaClientError),
+}
+
+impl BootstrapError {
+    /// Why a `/boot` or `/me` request failed, for the variants that carry
+    /// that failure. Every other variant answers `None`.
+    pub fn boot_failure_kind(&self) -> Option<FailureKind> {
+        match self {
+            BootstrapError::Boot(err) | BootstrapError::Me(err) => Some(FailureKind::of(err)),
+            _ => None,
+        }
+    }
+}
+
+/// The kind of failure of one request, kept for the UI and for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The server answered with this HTTP status.
+    Status(u16),
+    /// The server did not answer in time.
+    Timeout,
+    /// The connection to the server failed.
+    Connect,
+    /// Any other failure, such as an unreadable body.
+    Other,
+}
+
+impl FailureKind {
+    pub fn of(err: &GrappaClientError) -> Self {
+        if let Some(status) = err.status() {
+            return FailureKind::Status(status.as_u16());
+        }
+        match err {
+            GrappaClientError::Http(err) if err.is_timeout() => FailureKind::Timeout,
+            GrappaClientError::Http(err) if err.is_connect() => FailureKind::Connect,
+            _ => FailureKind::Other,
+        }
+    }
+
+    /// Whether a new attempt can help: a server fault (500, 502, 503, 504),
+    /// a timeout or a connect error. Any other status is final.
+    pub fn is_transient(self) -> bool {
+        matches!(
+            self,
+            FailureKind::Status(500 | 502 | 503 | 504)
+                | FailureKind::Timeout
+                | FailureKind::Connect
+        )
+    }
+}
+
+impl std::fmt::Display for FailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FailureKind::Status(code) => write!(f, "{code}"),
+            FailureKind::Timeout => f.write_str("timeout"),
+            FailureKind::Connect => f.write_str("connect"),
+            FailureKind::Other => f.write_str("other"),
+        }
+    }
+}
+
+/// Waits before the second and the third attempt of `/boot` and `/me`.
+/// Tests use no wait.
+const RETRY_DELAYS: [Duration; 2] = if cfg!(test) {
+    [Duration::ZERO, Duration::ZERO]
+} else {
+    [Duration::from_secs(2), Duration::from_secs(5)]
+};
+
+type RetryNotice = Box<dyn Fn() + Send + Sync>;
+
+static RETRY_NOTICE: OnceLock<RetryNotice> = OnceLock::new();
+
+/// Sets the function that runs each time `/boot` or `/me` waits for a new
+/// attempt. The first call wins; a later call does nothing.
+pub fn set_retry_notice(notice: impl Fn() + Send + Sync + 'static) {
+    let _ = RETRY_NOTICE.set(Box::new(notice));
+}
+
+/// The log line of one failed attempt. It holds the endpoint, the attempt
+/// number and the failure kind. It never holds a token or a body.
+fn attempt_log_line(endpoint: &str, attempt: usize, total: usize, kind: FailureKind) -> String {
+    format!("boot request failed: endpoint={endpoint} attempt={attempt}/{total} result={kind}")
+}
+
+/// Runs `call` again after a transient failure, one more time for each
+/// entry of `delays`. Only `call` repeats: the sign-in is never part of it.
+async fn fetch_with_retry<T, F, Fut>(
+    endpoint: &str,
+    delays: &[Duration],
+    mut call: F,
+) -> Result<T, GrappaClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, GrappaClientError>>,
+{
+    let total = delays.len() + 1;
+    let mut attempt = 1;
+    loop {
+        let err = match call().await {
+            Ok(value) => return Ok(value),
+            Err(err) => err,
+        };
+        let kind = FailureKind::of(&err);
+        persistence::log_line(&attempt_log_line(endpoint, attempt, total, kind));
+        if attempt >= total || !kind.is_transient() {
+            persistence::log_line(&format!(
+                "boot request gave up: endpoint={endpoint} attempts={attempt} result={kind}"
+            ));
+            return Err(err);
+        }
+        if let Some(notice) = RETRY_NOTICE.get() {
+            notice();
+        }
+        tokio::time::sleep(delays[attempt - 1]).await;
+        attempt += 1;
+    }
+}
+
+/// `GET /boot` then `GET /me` with the token, each one repeated on a
+/// transient failure. With `saved_bearer`, a 401 means the bearer is dead.
+async fn boot_and_me(
+    client: &GrappaClient,
+    token: &str,
+    saved_bearer: bool,
+) -> Result<(BootResponse, MeResponse), BootstrapError> {
+    let rejected = |err: &GrappaClientError| {
+        saved_bearer && err.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+    };
+    let boot = fetch_with_retry("/boot", &RETRY_DELAYS, || client.fetch_boot(token))
+        .await
+        .map_err(|err| {
+            if rejected(&err) {
+                BootstrapError::BearerRejected
+            } else {
+                BootstrapError::Boot(err)
+            }
+        })?;
+    let me = fetch_with_retry("/me", &RETRY_DELAYS, || client.fetch_me(token))
+        .await
+        .map_err(|err| {
+            if rejected(&err) {
+                BootstrapError::BearerRejected
+            } else {
+                BootstrapError::Me(err)
+            }
+        })?;
+    Ok((boot, me))
 }
 
 async fn check_server_compatibility(
@@ -118,14 +271,7 @@ pub async fn bootstrap_with_login_bearer(
     // Fetched sequentially rather than in parallel for now: correctness
     // over the minor latency win, until there's a real/mocked server to
     // benchmark the parallel version against.
-    let boot = client
-        .fetch_boot(&login.token)
-        .await
-        .map_err(BootstrapError::Boot)?;
-    let me = client
-        .fetch_me(&login.token)
-        .await
-        .map_err(BootstrapError::Me)?;
+    let (boot, me) = boot_and_me(client, &login.token, false).await?;
 
     Ok(BootstrapOutcome {
         compatibility,
@@ -149,14 +295,7 @@ pub async fn bootstrap_with_totp(
         .verify_totp_login(challenge_token, code)
         .await
         .map_err(BootstrapError::TwoFactor)?;
-    let boot = client
-        .fetch_boot(&login.token)
-        .await
-        .map_err(BootstrapError::Boot)?;
-    let me = client
-        .fetch_me(&login.token)
-        .await
-        .map_err(BootstrapError::Me)?;
+    let (boot, me) = boot_and_me(client, &login.token, false).await?;
     Ok(BootstrapOutcome {
         compatibility,
         token: login.token,
@@ -179,14 +318,7 @@ pub async fn bootstrap_with_recovery_code(
         .recover_passkey_login(identifier, recovery_code)
         .await
         .map_err(BootstrapError::Recovery)?;
-    let boot = client
-        .fetch_boot(&login.token)
-        .await
-        .map_err(BootstrapError::Boot)?;
-    let me = client
-        .fetch_me(&login.token)
-        .await
-        .map_err(BootstrapError::Me)?;
+    let (boot, me) = boot_and_me(client, &login.token, false).await?;
     Ok(BootstrapOutcome {
         compatibility,
         token: login.token,
@@ -208,14 +340,7 @@ pub async fn bootstrap_with_share_token(
         .consume_share_token(share_token)
         .await
         .map_err(BootstrapError::ShareToken)?;
-    let boot = client
-        .fetch_boot(&login.token)
-        .await
-        .map_err(BootstrapError::Boot)?;
-    let me = client
-        .fetch_me(&login.token)
-        .await
-        .map_err(BootstrapError::Me)?;
+    let (boot, me) = boot_and_me(client, &login.token, false).await?;
     Ok(BootstrapOutcome {
         compatibility,
         token: login.token,
@@ -235,20 +360,7 @@ pub async fn bootstrap_with_bearer(
 ) -> Result<BootstrapOutcome, BootstrapError> {
     let compatibility = check_server_compatibility(client).await?;
 
-    let boot = client.fetch_boot(bearer).await.map_err(|err| {
-        if err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-            BootstrapError::BearerRejected
-        } else {
-            BootstrapError::Boot(err)
-        }
-    })?;
-    let me = client.fetch_me(bearer).await.map_err(|err| {
-        if err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-            BootstrapError::BearerRejected
-        } else {
-            BootstrapError::Me(err)
-        }
-    })?;
+    let (boot, me) = boot_and_me(client, bearer, true).await?;
 
     Ok(BootstrapOutcome {
         compatibility,
@@ -709,5 +821,285 @@ mod tests {
             error,
             BootstrapError::Login(LoginError::InvalidCredentials)
         ));
+    }
+
+    const RETRY_TOKEN: &str = "fixed-retry-token-8f3a";
+
+    async fn mount_login(mock_server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": RETRY_TOKEN,
+                "subject": {"nick": "vjt"}
+            })))
+            .mount(mock_server)
+            .await;
+    }
+
+    /// Mounts `failures` answers with `status`, then a good answer.
+    async fn mount_flaky(mock_server: &MockServer, route: &str, status: u16, failures: u64) {
+        if failures > 0 {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(status))
+                .up_to_n_times(failures)
+                .mount(mock_server)
+                .await;
+        }
+        let body = if route == "/boot" {
+            serde_json::json!({"networks": []})
+        } else {
+            serde_json::json!({"badge_count": 0})
+        };
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(mock_server)
+            .await;
+    }
+
+    async fn calls(mock_server: &MockServer, route: &str, http_method: &str) -> usize {
+        mock_server
+            .received_requests()
+            .await
+            .expect("recording")
+            .iter()
+            .filter(|request| request.url.path() == route && request.method.as_str() == http_method)
+            .count()
+    }
+
+    fn login_request() -> LoginRequest {
+        LoginRequest {
+            identifier: "vjt".to_string(),
+            password: "pw".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_is_repeated_after_two_server_errors_and_login_is_sent_once() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        mount_login(&mock_server).await;
+        mount_flaky(&mock_server, "/boot", 500, 2).await;
+        mount_flaky(&mock_server, "/me", 200, 0).await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        bootstrap(&client, &login_request())
+            .await
+            .expect("sign-in succeeds on the third attempt");
+
+        assert_eq!(calls(&mock_server, "/boot", "GET").await, 3);
+        assert_eq!(calls(&mock_server, "/me", "GET").await, 1);
+        assert_eq!(calls(&mock_server, "/auth/login", "POST").await, 1);
+    }
+
+    #[tokio::test]
+    async fn boot_gives_up_after_three_server_errors() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        mount_login(&mock_server).await;
+        mount_flaky(&mock_server, "/boot", 500, 10).await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let error = bootstrap(&client, &login_request())
+            .await
+            .expect_err("three errors end the sign-in");
+
+        assert!(matches!(error, BootstrapError::Boot(_)));
+        assert_eq!(error.boot_failure_kind(), Some(FailureKind::Status(500)));
+        assert_eq!(calls(&mock_server, "/boot", "GET").await, 3);
+        assert_eq!(calls(&mock_server, "/auth/login", "POST").await, 1);
+    }
+
+    #[tokio::test]
+    async fn boot_repeats_on_502_503_and_504() {
+        for status in [502, 503, 504] {
+            let mock_server = MockServer::start().await;
+            mock_config(
+                &mock_server,
+                crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+            )
+            .await;
+            mount_flaky(&mock_server, "/boot", status, 1).await;
+            mount_flaky(&mock_server, "/me", 200, 0).await;
+
+            let client = GrappaClient::new(mock_server.uri());
+            bootstrap_with_bearer(&client, RETRY_TOKEN)
+                .await
+                .expect("second attempt succeeds");
+            assert_eq!(calls(&mock_server, "/boot", "GET").await, 2, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_does_not_repeat_on_404_and_403() {
+        for status in [404, 403] {
+            let mock_server = MockServer::start().await;
+            mock_config(
+                &mock_server,
+                crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+            )
+            .await;
+            mount_flaky(&mock_server, "/boot", status, 10).await;
+
+            let client = GrappaClient::new(mock_server.uri());
+            let error = bootstrap_with_bearer(&client, RETRY_TOKEN)
+                .await
+                .expect_err("final status");
+            assert_eq!(
+                error.boot_failure_kind(),
+                Some(FailureKind::Status(status)),
+                "{status}"
+            );
+            assert_eq!(calls(&mock_server, "/boot", "GET").await, 1, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_bearer_rejected_by_boot_is_not_repeated() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        mount_flaky(&mock_server, "/boot", 401, 10).await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let error = bootstrap_with_bearer(&client, RETRY_TOKEN)
+            .await
+            .expect_err("revoked bearer");
+
+        assert!(matches!(error, BootstrapError::BearerRejected));
+        assert_eq!(calls(&mock_server, "/boot", "GET").await, 1);
+    }
+
+    #[tokio::test]
+    async fn me_follows_the_same_rules_and_boot_is_not_asked_again() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        mount_flaky(&mock_server, "/boot", 200, 0).await;
+        mount_flaky(&mock_server, "/me", 503, 2).await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        bootstrap_with_bearer(&client, RETRY_TOKEN)
+            .await
+            .expect("third attempt of /me succeeds");
+        assert_eq!(calls(&mock_server, "/boot", "GET").await, 1);
+        assert_eq!(calls(&mock_server, "/me", "GET").await, 3);
+
+        let failing = MockServer::start().await;
+        mock_config(&failing, crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION).await;
+        mount_flaky(&failing, "/boot", 200, 0).await;
+        mount_flaky(&failing, "/me", 500, 10).await;
+        let client = GrappaClient::new(failing.uri());
+        let error = bootstrap_with_bearer(&client, RETRY_TOKEN)
+            .await
+            .expect_err("three errors end the sign-in");
+        assert!(matches!(error, BootstrapError::Me(_)));
+        assert_eq!(calls(&failing, "/me", "GET").await, 3);
+        assert_eq!(calls(&failing, "/boot", "GET").await, 1);
+
+        let refused = MockServer::start().await;
+        mock_config(&refused, crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION).await;
+        mount_flaky(&refused, "/boot", 200, 0).await;
+        mount_flaky(&refused, "/me", 404, 10).await;
+        let client = GrappaClient::new(refused.uri());
+        bootstrap_with_bearer(&client, RETRY_TOKEN)
+            .await
+            .expect_err("404 is final");
+        assert_eq!(calls(&refused, "/me", "GET").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_repeated_and_reported_as_a_timeout() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(1500)))
+            .mount(&mock_server)
+            .await;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .expect("client");
+        let url = format!("{}/slow", mock_server.uri());
+
+        let error = fetch_with_retry::<(), _, _>("/boot", &RETRY_DELAYS, || {
+            let request = http.get(&url).send();
+            async move {
+                request.await?;
+                Ok(())
+            }
+        })
+        .await
+        .expect_err("every attempt times out");
+
+        assert_eq!(FailureKind::of(&error), FailureKind::Timeout);
+        assert_eq!(calls(&mock_server, "/slow", "GET").await, 3);
+    }
+
+    #[tokio::test]
+    async fn a_connect_error_is_repeated() {
+        let http = reqwest::Client::new();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        // Port 1 on the loopback address refuses connections.
+        let error = fetch_with_retry::<(), _, _>("/me", &RETRY_DELAYS, || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let request = http.get("http://127.0.0.1:1/me").send();
+            async move {
+                request.await?;
+                Ok(())
+            }
+        })
+        .await
+        .expect_err("connection refused");
+
+        assert_eq!(FailureKind::of(&error), FailureKind::Connect);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn only_server_faults_timeouts_and_connect_errors_are_transient() {
+        for status in [500, 502, 503, 504] {
+            assert!(FailureKind::Status(status).is_transient(), "{status}");
+        }
+        for status in [400, 401, 403, 404, 429, 501] {
+            assert!(!FailureKind::Status(status).is_transient(), "{status}");
+        }
+        assert!(FailureKind::Timeout.is_transient());
+        assert!(FailureKind::Connect.is_transient());
+        assert!(!FailureKind::Other.is_transient());
+    }
+
+    #[tokio::test]
+    async fn the_attempt_log_line_holds_the_endpoint_and_never_the_token() {
+        let mock_server = MockServer::start().await;
+        mount_flaky(&mock_server, "/boot", 500, 10).await;
+        let client = GrappaClient::new(mock_server.uri());
+        let error = client
+            .fetch_boot(RETRY_TOKEN)
+            .await
+            .expect_err("server error");
+
+        let line = attempt_log_line("/boot", 2, 3, FailureKind::of(&error));
+
+        assert_eq!(
+            line,
+            "boot request failed: endpoint=/boot attempt=2/3 result=500"
+        );
+        assert!(!line.contains(RETRY_TOKEN));
     }
 }
