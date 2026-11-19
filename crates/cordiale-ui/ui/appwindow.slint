@@ -3735,6 +3735,12 @@ export component AppWindow inherits Window {
             return @tr("That isn't a valid IRC nickname. Enter one in the name field.");
         } else if status-kind == "guest-captcha-required" {
             return @tr("This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead.");
+        } else if status-kind == "boot-me-retrying" {
+            return @tr("The server is slow. Trying again…");
+        } else if status-kind == "boot-me-server-error" {
+            return @tr("The server could not load your account data (error {}). Try again in a minute.", status-message);
+        } else if status-kind == "boot-me-timeout" {
+            return @tr("The server did not answer in time. Try again in a minute.");
         } else if status-kind == "boot-me-failed" {
             return @tr("Signed in, but couldn't load account data.");
         } else if status-kind == "unreachable" {

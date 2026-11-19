@@ -18745,3 +18745,28 @@ fn typing_continues_after_a_bracket_and_after_enter() {
     key("]");
     assert_eq!(ui.get_compose_text(), "x]");
 }
+
+#[test]
+fn boot_failure_status_maps_the_failure_kind_to_a_status_kind() {
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Status(500))),
+        ("boot-me-server-error", "500".to_string())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Status(503))),
+        ("boot-me-server-error", "503".to_string())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Timeout)),
+        ("boot-me-timeout", String::new())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Connect)),
+        ("boot-me-failed", String::new())
+    );
+    assert_eq!(
+        boot_failure_status(Some(FailureKind::Other)),
+        ("boot-me-failed", String::new())
+    );
+    assert_eq!(boot_failure_status(None), ("boot-me-failed", String::new()));
+}
