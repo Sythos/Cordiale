@@ -18807,6 +18807,114 @@ fn typing_continues_after_a_bracket_and_after_enter() {
 }
 
 #[test]
+fn typing_continues_after_each_send_path_in_every_compose_context() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    // (name, query, encrypted query, server command field)
+    let contexts = [
+        ("channel", false, false, false),
+        ("plain query", true, false, false),
+        ("encrypted query", true, true, false),
+        ("server command field", false, false, true),
+    ];
+    for (name, query, encrypted, server) in contexts {
+        let ui = AppWindow::new().unwrap();
+        ui.set_screen("connected".into());
+        ui.set_has_selected_channel(true);
+        ui.set_current_channel_label("#rust".into());
+        ui.set_current_query(query);
+        ui.set_current_query_ready(query);
+        ui.set_current_query_e2e(encrypted);
+        ui.set_current_server_window(server);
+        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let history = Rc::new(RefCell::new(input_history::InputHistory::default()));
+        let usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
+        ui_callbacks::register_composer_callbacks(&ui, &worker_tx, &history, &usage);
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+        let settle = || {
+            for _ in 0..3 {
+                slint::platform::update_timers_and_animations();
+                ui.window().take_snapshot().unwrap();
+            }
+        };
+        settle();
+        let key = |text: slint::SharedString| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
+        settle();
+
+        // Punctuation, also typed with AltGr held (a layout where `]`
+        // needs it), keeps the focus in the field.
+        for text in ["a", "]", "b", "[", "}", ";", "'", "\\", "c"] {
+            key(text.into());
+        }
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::AltGr.into(),
+        });
+        key("]".into());
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::AltGr.into(),
+        });
+        key("d".into());
+        assert_eq!(ui.get_compose_text(), "a]b[};'\\c]d", "{name}: typing");
+
+        // Path 1: Enter sends, and the next text is typed at once.
+        key("\n".into());
+        settle();
+        assert_eq!(ui.get_compose_text(), "", "{name}: after Enter");
+        key("x".into());
+        key("]".into());
+        assert_eq!(ui.get_compose_text(), "x]", "{name}: typing after Enter");
+
+        // Path 2: a click on the Send button. The button sits at the right
+        // end of the compose bar: scan the bar from its middle until the
+        // click sends the text.
+        let mut clicked = false;
+        'scan: for y in (0..20).map(|row| 796. - row as f32 * 4.) {
+            for x in (300..1100).step_by(4) {
+                ui.set_compose_text("z".into());
+                let position = slint::LogicalPosition::new(x as f32, y);
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                if ui.get_compose_text().is_empty() {
+                    clicked = true;
+                    break 'scan;
+                }
+            }
+        }
+        assert!(clicked, "{name}: the Send button was not found");
+        settle();
+        key("y".into());
+        key("]".into());
+        assert_eq!(ui.get_compose_text(), "y]", "{name}: typing after Send");
+
+        // Each typed key also queues a draft update: keep the sent bodies.
+        let sent: Vec<String> = std::iter::from_fn(|| worker_rx.try_recv().ok())
+            .filter_map(|command| match command {
+                WorkerCommand::SendMessage { body } => Some(body),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec!["a]b[};'\\c]d".to_string(), "z".to_string()],
+            "{name}: sent bodies"
+        );
+    }
+}
+
+#[test]
 fn boot_failure_status_maps_the_failure_kind_to_a_status_kind() {
     assert_eq!(
         boot_failure_status(Some(FailureKind::Status(500))),
