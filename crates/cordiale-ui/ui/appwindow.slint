@@ -1457,6 +1457,78 @@ component CleartextNotice {
     }
 }
 
+// The progress bar of the startup with one short status text under it.
+// The stage is a number that Rust sets when the work of that stage starts;
+// the value is the share of the work that is done.
+component StartupProgress inherits VerticalLayout {
+    in property <int> stage: 0;
+    in property <float> value: 0;
+    spacing: 8px;
+
+    pure function status-text(stage: int) -> string {
+        if stage == 1 {
+            return @tr("Starting services…");
+        }
+        if stage == 2 {
+            return @tr("Signing in…");
+        }
+        if stage == 3 {
+            return @tr("Loading account data…");
+        }
+        if stage == 4 {
+            return @tr("Opening the main window…");
+        }
+        return @tr("Loading settings…");
+    }
+
+    HorizontalLayout {
+        alignment: center;
+
+        ProgressIndicator {
+            preferred-width: 280px;
+            min-width: 0px;
+            progress: root.value;
+        }
+    }
+
+    Text {
+        text: status-text(root.stage);
+        horizontal-alignment: center;
+        accessible-live-region: AccessibleLiveness.polite;
+    }
+}
+
+// The window of the startup: small and fixed in size, the banner, the
+// progress bar and the status text. The main window opens when it ends.
+export component SplashWindow inherits Window {
+    title: "Cordiale";
+    preferred-width: 340px;
+    min-width: 340px;
+    max-width: 340px;
+    preferred-height: 290px;
+    min-height: 290px;
+    max-height: 290px;
+    in property <int> stage: 0;
+    in property <float> progress: 0;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 16px;
+        alignment: center;
+
+        Image {
+            source: @image-url("../../../resources/branding/cordiale.png");
+            image-fit: contain;
+            height: 160px;
+        }
+
+        StartupProgress {
+            stage: root.stage;
+            value: root.progress;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     in-out property <int> font-size-percent: 100;
     callback font-size-changed(int);
@@ -1563,16 +1635,15 @@ export component AppWindow inherits Window {
             chat-follow-bottom
         );
     }
-    // Set once by Rust before the window is shown: where the splash
-    // screen hands off to once its animation finishes ("language" on
-    // first launch, "connect" otherwise).
+    // Set once by Rust before the startup: the screen the main window
+    // opens on when no sign-in chose one ("language" on first launch,
+    // "connect" otherwise). The window starts on "splash", which has no
+    // content: the splash is a window of its own.
     in property <string> next-screen: "connect";
-    // Set by Rust once the window is up and placed: the splash does not
-    // hand off before.
-    in property <bool> startup-ready: false;
-    // Called once when the splash hands off. The sign-in at launch starts
-    // here, so a fast login never replaces the splash.
-    callback splash-finished();
+    // The stage and the share of work done of the sign-in, set by Rust as
+    // each stage starts. The connect screen shows them while it waits.
+    in property <int> startup-stage: 2;
+    in property <float> startup-progress: 0;
     // Which Settings section is open; mirrors Cicchetto's own Settings
     // drawer categories (see docs/feature-matrix.md) so the navigation
     // feels familiar to anyone coming from that client.
@@ -3927,56 +3998,6 @@ export component AppWindow inherits Window {
         accessible-role: AccessibleRole.none;
     }
 
-    if screen == "splash" : VerticalBox {
-        padding: 32px;
-        spacing: 24px;
-        alignment: center;
-
-        property <float> splash-progress: 0;
-        animate splash-progress {
-            duration: 1800ms;
-            easing: ease-out;
-        }
-        // The splash ends when its animation is over and Rust says the
-        // startup is ready, whichever comes last.
-        property <bool> splash-elapsed: false;
-        property <bool> splash-done: splash-elapsed && startup-ready;
-        changed splash-done => {
-            if splash-done {
-                screen = next-screen;
-                splash-finished();
-            }
-        }
-
-        init => {
-            splash-progress = 1.0;
-        }
-
-        Timer {
-            interval: 1900ms;
-            running: true;
-            triggered => {
-                splash-elapsed = true;
-            }
-        }
-
-        Image {
-            source: @image-url("../../../resources/branding/cordiale.png");
-            image-fit: contain;
-            height: 220px;
-        }
-
-        HorizontalLayout {
-            alignment: center;
-
-            ProgressIndicator {
-                preferred-width: 320px;
-                min-width: 0px;
-                progress: splash-progress;
-            }
-        }
-    }
-
     if screen == "language" : VerticalBox {
         padding: 32px;
         spacing: 16px;
@@ -4241,6 +4262,12 @@ export component AppWindow inherits Window {
             text: connecting ? @tr("Connecting…") : @tr("Connect");
             enabled: !connecting && passkey-origin-ok && !cleartext-blocked;
             clicked => { connect-requested(server-url, identifier, password); }
+        }
+
+        // The sign-in and the account load, while the chat stays hidden.
+        if connecting : StartupProgress {
+            stage: startup-stage;
+            value: startup-progress;
         }
 
         // A passwordless account: no password, a passkey for the server.

@@ -65,6 +65,7 @@ mod read_cursor_sync;
 mod reply;
 mod reply_presence;
 mod slash;
+mod startup;
 mod svg_image;
 mod symbol_fonts;
 mod taskbar;
@@ -89,8 +90,8 @@ use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
     bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_recovery_code,
-    bootstrap_with_share_token, bootstrap_with_totp, set_retry_notice, BootstrapError,
-    BootstrapOutcome, FailureKind,
+    bootstrap_with_share_token, bootstrap_with_totp, set_retry_notice, set_stage_notice,
+    BootstrapError, BootstrapOutcome, FailureKind,
 };
 use cordiale_core::cleartext;
 use cordiale_core::client::{
@@ -624,6 +625,12 @@ enum PasskeySignIn {
 fn main() -> Result<(), slint::PlatformError> {
     persistence::init_storage();
     symbol_fonts::register_symbol_fonts();
+    // The splash is a small window of its own. The main window stays hidden
+    // until the sign-in at launch ends. A host that cannot place the splash
+    // keeps its own placement.
+    let splash = SplashWindow::new()?;
+    splash.show()?;
+    center_window_on_monitor(splash.window());
     let ui = AppWindow::new()?;
     debug_info::watch_renderer(ui.window());
 
@@ -641,6 +648,19 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     });
 
+    // The sign-in tells which stage it is in; the worker thread sends that
+    // to the UI thread, so the splash stays responsive during the requests.
+    let stage_ui = Mutex::new(ui.as_weak());
+    set_stage_notice(move |stage| {
+        let weak = stage_ui
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            startup::advance(&ui, startup::StartupStage::from_bootstrap(stage));
+        });
+    });
+
     // Settings > Credits: Cordiale's own info only, never a list of
     // Grappa/Cicchetto's contributors — explicit project-owner
     // requirement.
@@ -653,6 +673,8 @@ fn main() -> Result<(), slint::PlatformError> {
     load_passkey_origin_field(&ui, &remembered_server_url);
 
     let settings = persistence::load_settings().unwrap_or_default();
+    startup::begin(splash, settings.window);
+    startup::advance(&ui, startup::StartupStage::LoadingSettings);
     // A remembered http:// server that isn't this device waits for the
     // connect screen, where the cleartext warning asks for a confirmation.
     let auto_connect = settings.auto_connect
@@ -694,6 +716,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_video_shrink_available(video_processing::is_available());
     push_radio_stations(&ui, &settings.radio_stations);
 
+    startup::advance(&ui, startup::StartupStage::StartingServices);
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let shrink_notices = Arc::new(Mutex::new(ShrinkNoticeTracker::default()));
     let dismissed_shrink_notices = Arc::clone(&shrink_notices);
@@ -754,25 +777,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // Sign in at launch with the remembered profile (its bearer, or the
     // login password kept in the OS keyring), unless the last session ended
     // with a manual disconnect.
-    // The sign-in waits for the end of the splash: a fast login would
-    // otherwise replace the splash with the connected screen.
+    // The sign-in is part of the startup: the splash stays until it ends.
     if auto_connect {
         if let Some(identifier) = auto_connect_identifier(&remembered_server_url) {
-            let tx_for_connect = worker_tx.clone();
-            let weak_for_connect = ui.as_weak();
-            let server_url = remembered_server_url.clone();
-            ui.on_splash_finished(move || {
-                if let Some(ui) = weak_for_connect.upgrade() {
-                    ui.set_connecting(true);
-                }
-                let _ = tx_for_connect.send(WorkerCommand::Connect {
-                    server_url: server_url.clone(),
-                    identifier: identifier.clone(),
-                    credential: ConnectCredential::SavedProfile,
-                });
+            ui.set_connecting(true);
+            startup::advance(&ui, startup::StartupStage::SigningIn);
+            let _ = worker_tx.send(WorkerCommand::Connect {
+                server_url: remembered_server_url.clone(),
+                identifier,
+                credential: ConnectCredential::SavedProfile,
             });
         }
     }
+    // The main window opens when the sign-in ends, with success or not.
+    // With no sign-in to wait for, it opens at once.
+    startup::watch_sign_in(&ui);
 
     let input_history = Rc::new(RefCell::new(input_history::InputHistory::default()));
     let command_usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
@@ -832,19 +851,13 @@ fn main() -> Result<(), slint::PlatformError> {
     register_admin_settings_callbacks(&ui, &worker_tx);
     register_settings_callbacks(&ui, &worker_tx);
 
-    // Window size, position, state and column widths come back from the
-    // local settings; the timer saves them again after a change.
-    let window_state_timer = window_state::install(&ui, settings.window);
-
-    // Show the window first: the native window must exist to be moved.
-    // A platform that refuses the move keeps its own placement. A saved
-    // position replaces the centered one when the event loop starts.
-    ui.show()?;
-    center_window_on_monitor(&ui);
-    ui.set_startup_ready(true);
+    // The main window stays hidden: `startup::finish` shows it after the
+    // sign-in. It restores the window size, position, state and column
+    // widths from the local settings and saves them again after a change.
     let result = slint::run_event_loop();
-    window_state_timer.flush();
-    drop(window_state_timer);
+    if let Some(window_state_timer) = startup::take_window_saver() {
+        window_state_timer.flush();
+    }
     let _ = ui.hide();
 
     // Closing the window quits: tell Grappa the client is leaving, so
@@ -889,9 +902,9 @@ fn centered_position(monitor: ((i32, i32), (u32, u32)), window: (u32, u32)) -> (
 /// Moves the window to the center of its monitor. Best effort: where the
 /// window system gives no monitor or ignores the position (Wayland), the
 /// native placement stays and nothing is reported.
-fn center_window_on_monitor(ui: &AppWindow) {
+fn center_window_on_monitor(slint_window: &slint::Window) {
     use slint::winit_030::WinitWindowAccessor;
-    let _ = ui.window().with_winit_window(|window| {
+    let _ = slint_window.with_winit_window(|window| {
         let monitor = window
             .current_monitor()
             .or_else(|| window.primary_monitor())?;
