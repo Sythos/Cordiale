@@ -18884,12 +18884,19 @@ fn typing_continues_after_each_send_path_in_every_compose_context() {
         assert_eq!(sent, vec!["a]b[};'\\c]d".to_string()], "{name}: Enter body");
 
         // Path 2: a click on the Send button. The button sits at the right
-        // end of the compose bar, left of the members column. Scan that
-        // part of the bar. Only a queued message proves a send: a click on
-        // the field can change the text without sending it.
+        // end of the compose bar, left of the members column. The width of
+        // the side columns comes from measured text, so it changes with the
+        // fonts and the widget style of the host: no fixed x is safe. Scan
+        // each row from the window center (in the field) to the right edge,
+        // and stop at the first send: in the compose row the scan then never
+        // reaches the members column. Try the middle of that row first (window
+        // height, 16px padding, half of the 36px row). Only a queued message
+        // proves a send: a click on the field can change the text without
+        // sending it.
         let mut clicked = false;
-        'scan: for y in (0..20).map(|row| 796. - row as f32 * 4.) {
-            for x in (880..1010).step_by(3) {
+        let rows = std::iter::once(766.).chain((0..20).map(|row| 796. - row as f32 * 4.));
+        'scan: for y in rows {
+            for x in (600..1200).step_by(2) {
                 ui.set_compose_text("z".into());
                 let position = slint::LogicalPosition::new(x as f32, y);
                 ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -18907,7 +18914,11 @@ fn typing_continues_after_each_send_path_in_every_compose_context() {
                 }
             }
         }
-        assert!(clicked, "{name}: the Send button was not found");
+        assert!(
+            clicked,
+            "{name}: the Send button was not found (screen {})",
+            ui.get_screen()
+        );
         assert_eq!(ui.get_compose_text(), "", "{name}: after Send");
         settle();
         key("y".into());
