@@ -1275,6 +1275,9 @@ pub(crate) fn register_composer_callbacks(
         let _ = tx_for_send.send(WorkerCommand::SendMessage { body });
         if let Some(ui) = weak_for_send.upgrade() {
             ui.set_compose_text("".into());
+            // The Send button takes the focus on a click: put it back in
+            // the field so the next message can be typed at once.
+            ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
         }
     });
 

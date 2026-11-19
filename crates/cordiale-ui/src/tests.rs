@@ -18677,3 +18677,69 @@ fn a_keyboard_page_hides_the_unread_divider() {
     assert_eq!(ui.get_unread_divider_id(), "");
     assert!(ui.get_unread_divider_dismissed());
 }
+
+#[test]
+fn sending_a_message_asks_for_the_focus_in_the_compose_field() {
+    let ui = AppWindow::new().unwrap();
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let history = Rc::new(RefCell::new(input_history::InputHistory::default()));
+    let usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
+    ui_callbacks::register_composer_callbacks(&ui, &worker_tx, &history, &usage);
+    // Enter and the Send button both call this callback.
+    for body in ["first]", "second"] {
+        let before = ui.get_compose_focus_request();
+        ui.set_compose_text(body.into());
+        ui.invoke_send_chat_message(body.into());
+        assert_eq!(ui.get_compose_focus_request(), before + 1);
+        assert_eq!(ui.get_compose_text(), "");
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Ok(WorkerCommand::SendMessage { body: sent }) if sent == body
+        ));
+    }
+}
+
+#[test]
+fn typing_continues_after_a_bracket_and_after_enter() {
+    use slint::platform::WindowEvent;
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_channel_label("#rust".into());
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let history = Rc::new(RefCell::new(input_history::InputHistory::default()));
+    let usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
+    ui_callbacks::register_composer_callbacks(&ui, &worker_tx, &history, &usage);
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+    let settle = || {
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            ui.window().take_snapshot().unwrap();
+        }
+    };
+    settle();
+    let key = |text: &str| {
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+    };
+    ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
+    settle();
+    for text in ["a", "]", "b", "[", "}", "c"] {
+        key(text);
+    }
+    assert_eq!(ui.get_compose_text(), "a]b[}c");
+    // Enter sends and the next message is typed at once, without a click.
+    key("\n");
+    settle();
+    assert_eq!(ui.get_compose_text(), "");
+    assert!(matches!(
+        worker_rx.try_recv(),
+        Ok(WorkerCommand::SendMessage { body }) if body == "a]b[}c"
+    ));
+    key("x");
+    key("]");
+    assert_eq!(ui.get_compose_text(), "x]");
+}
