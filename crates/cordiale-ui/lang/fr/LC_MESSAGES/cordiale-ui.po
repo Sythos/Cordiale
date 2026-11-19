@@ -4350,3 +4350,23 @@ msgstr "Tout sélectionner"
 msgctxt "AppWindow"
 msgid "Loaded chat messages"
 msgstr "Messages du chat chargés"
+
+msgctxt "StartupProgress"
+msgid "Loading settings…"
+msgstr "Chargement des réglages…"
+
+msgctxt "StartupProgress"
+msgid "Starting services…"
+msgstr "Démarrage des services…"
+
+msgctxt "StartupProgress"
+msgid "Signing in…"
+msgstr "Connexion au compte…"
+
+msgctxt "StartupProgress"
+msgid "Loading account data…"
+msgstr "Chargement des données du compte…"
+
+msgctxt "StartupProgress"
+msgid "Opening the main window…"
+msgstr "Ouverture de la fenêtre principale…"

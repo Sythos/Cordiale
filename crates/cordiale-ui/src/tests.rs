@@ -365,47 +365,103 @@ fn startup_opens_on_the_splash_and_hands_off_by_language() {
 }
 
 #[test]
-fn splash_waits_for_the_startup_and_never_returns() {
+fn splash_follows_the_startup_and_hands_off_once() {
     // A thread of its own: a thread takes one platform.
     std::thread::spawn(|| {
         let _clipboard = set_manual_clock_platform();
         let ui = AppWindow::new().unwrap();
         ui.set_next_screen("language".into());
-        let finished = std::rc::Rc::new(std::cell::Cell::new(0));
-        let finished_in_callback = std::rc::Rc::clone(&finished);
-        ui.on_splash_finished(move || finished_in_callback.set(finished_in_callback.get() + 1));
-        ui.show().unwrap();
-        ui.window().set_size(slint::LogicalSize::new(900., 600.));
-        let advance = |ui: &AppWindow, milliseconds: u64| {
-            slint::platform::update_timers_and_animations();
-            // A frame makes every timer of the window read its state.
-            ui.window().take_snapshot().unwrap();
-            for _ in 0..(milliseconds / 100) {
-                MANUAL_CLOCK
-                    .with(|clock| clock.set(clock.get() + std::time::Duration::from_millis(100)));
-                slint::platform::update_timers_and_animations();
-            }
-            // A last frame runs the change handlers.
-            ui.window().take_snapshot().unwrap();
-        };
-        // The animation is over, but the startup is not ready: the splash stays.
-        advance(&ui, 2500);
+        let splash = SplashWindow::new().unwrap();
+        startup::begin(splash.clone_strong(), None);
+        // The main window stays hidden and on no screen while the startup runs.
+        startup::advance(&ui, startup::StartupStage::LoadingSettings);
+        startup::advance(&ui, startup::StartupStage::SigningIn);
         assert_eq!(ui.get_screen(), "splash");
-        assert_eq!(finished.get(), 0);
-        // The startup is ready: the splash hands off to the next screen.
-        ui.set_startup_ready(true);
-        advance(&ui, 300);
-        assert_eq!(ui.get_screen(), "language");
-        // The sign-in at launch starts once, at the handoff.
-        assert_eq!(finished.get(), 1);
-        // The splash does not come back after the user enters the application.
+        assert_eq!(splash.get_stage(), 2);
+        assert!(splash.get_progress() < 1.0);
+        // The account is ready: the main window opens and the bar is full.
         ui.set_screen("connected".into());
-        advance(&ui, 2500);
+        startup::finish(&ui, startup::startup_completed(&ui.get_screen()));
         assert_eq!(ui.get_screen(), "connected");
-        assert_eq!(finished.get(), 1);
+        assert_eq!(splash.get_progress(), 1.0);
+        assert!(startup::take_window_saver().is_some());
+        // The handoff runs once: a later call changes nothing.
+        ui.set_screen("settings".into());
+        startup::finish(&ui, true);
+        assert_eq!(ui.get_screen(), "settings");
     })
     .join()
     .unwrap();
+}
+
+#[test]
+fn failed_startup_opens_the_next_screen_without_a_full_bar() {
+    std::thread::spawn(|| {
+        let _clipboard = set_manual_clock_platform();
+        let ui = AppWindow::new().unwrap();
+        ui.set_next_screen("connect".into());
+        let splash = SplashWindow::new().unwrap();
+        startup::begin(splash.clone_strong(), None);
+        startup::advance(&ui, startup::StartupStage::SigningIn);
+        startup::advance(&ui, startup::StartupStage::LoadingAccount);
+        // The account load failed: no screen was chosen, so the next one opens.
+        assert!(!startup::startup_completed(&ui.get_screen()));
+        startup::finish(&ui, false);
+        assert_eq!(ui.get_screen(), "connect");
+        assert!(splash.get_progress() < 1.0);
+        assert_eq!(splash.get_stage(), 3);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn startup_stages_start_in_order_and_never_fill_the_bar() {
+    use cordiale_core::bootstrap::BootstrapStage;
+    use startup::StartupStage;
+    let stages = [
+        StartupStage::LoadingSettings,
+        StartupStage::StartingServices,
+        StartupStage::SigningIn,
+        StartupStage::LoadingAccount,
+        StartupStage::OpeningMainWindow,
+    ];
+    for pair in stages.windows(2) {
+        assert!(pair[0] < pair[1]);
+        assert!(pair[0].progress() < pair[1].progress());
+        assert_eq!(pair[0].index() + 1, pair[1].index());
+    }
+    assert_eq!(stages[0].progress(), 0.0);
+    assert!(stages[4].progress() < 1.0);
+    assert_eq!(
+        StartupStage::from_bootstrap(BootstrapStage::SigningIn),
+        StartupStage::SigningIn
+    );
+    assert_eq!(
+        StartupStage::from_bootstrap(BootstrapStage::LoadingAccount),
+        StartupStage::LoadingAccount
+    );
+}
+
+#[test]
+fn startup_handoff_keeps_a_screen_the_sign_in_chose() {
+    assert_eq!(
+        startup::screen_after_startup("splash", "connect"),
+        "connect"
+    );
+    assert_eq!(
+        startup::screen_after_startup("splash", "language"),
+        "language"
+    );
+    assert_eq!(startup::screen_after_startup("totp", "connect"), "totp");
+    assert_eq!(
+        startup::screen_after_startup("connected", "connect"),
+        "connected"
+    );
+    assert!(startup::startup_completed("connected"));
+    assert!(!startup::startup_completed("splash"));
+    assert!(!startup::startup_completed("connect"));
+    assert!(!startup::startup_completed("totp"));
 }
 
 #[test]
