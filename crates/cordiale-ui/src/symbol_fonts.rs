@@ -55,12 +55,21 @@ fn symbol_font_candidates(windows_dir: Option<&str>) -> Vec<PathBuf> {
 pub fn register_symbol_fonts() {
     let windows_dir = std::env::var("WINDIR").ok();
     let mut collection = shared_collection();
+    install_fallback_fonts(
+        &mut collection,
+        &symbol_font_candidates(windows_dir.as_deref()),
+    );
+}
+
+/// Registers the font files that exist and the bundled emoji font in the
+/// collection. Then adds all of them to the end of the fallback lists.
+fn install_fallback_fonts(collection: &mut fontique::Collection, system_fonts: &[PathBuf]) {
     let mut families = Vec::new();
-    for path in symbol_font_candidates(windows_dir.as_deref()) {
+    for path in system_fonts {
         if !path.is_file() {
             continue;
         }
-        match std::fs::read(&path) {
+        match std::fs::read(path) {
             Ok(data) => {
                 let blob = fontique::Blob::new(std::sync::Arc::new(data));
                 for (family, _) in collection.register_fonts(blob, None) {
@@ -166,6 +175,44 @@ mod tests {
         for ch in ['\u{1FAEB}', '\u{1FADD}', '\u{1F600}'] {
             assert!(face.glyph_index(ch).is_some(), "U+{:04X}", ch as u32);
         }
+    }
+
+    #[test]
+    fn the_emoji_font_is_in_every_fallback_list_without_system_fonts() {
+        // A clean collection has no system font: this is the worst case, and
+        // it is the same on Windows, macOS and Linux.
+        let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        install_fallback_fonts(&mut collection, &[]);
+        for script in FALLBACK_SCRIPTS {
+            let key = fontique::FallbackKey::new(fontique::Script::from_bytes(script), None);
+            let ids: Vec<_> = collection.fallback_families(key).collect();
+            let names: Vec<String> = ids
+                .into_iter()
+                .filter_map(|id| collection.family_name(id).map(str::to_owned))
+                .collect();
+            assert!(
+                names.iter().any(|name| name.contains("OpenMoji")),
+                "{script:?}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn installing_the_fonts_twice_does_not_repeat_a_family() {
+        let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        install_fallback_fonts(&mut collection, &[]);
+        install_fallback_fonts(&mut collection, &[]);
+        let key = fontique::FallbackKey::new(fontique::Script::from_bytes(*b"Zyyy"), None);
+        let ids: Vec<_> = collection.fallback_families(key).collect();
+        let mut unique = ids.clone();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len());
     }
 
     #[test]
