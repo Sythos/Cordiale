@@ -214,6 +214,8 @@ enum WorkerCommand {
         visible: bool,
         follow_bottom: bool,
     },
+    /// The bottom of a chat row, with this message id, came into view.
+    ChatRowVisible(String),
     SelectNetwork(String),
     /// Home page: parks a connected network (after its confirmation).
     HomeDisconnect(String),
@@ -2192,6 +2194,9 @@ async fn run_worker(
                         if visible && follow_bottom {
                             mark_active_window_read(&mut state, &ui);
                         }
+                    }
+                    Some(WorkerCommand::ChatRowVisible(id)) => {
+                        unread_divider::mark_row_visible(&mut state, &ui, &id);
                     }
                     Some(WorkerCommand::SelectNetwork(network)) => {
                         run_select_network(&mut state, &ui, network).await;
@@ -8391,6 +8396,35 @@ fn write_back_read_cursor(state: &mut WorkerState) {
         }
     }
     flush_read_cursor_sync(state);
+}
+
+/// Advances the cursor of a channel through `through`, a message that the
+/// reader sees in the pane. Later messages stay unread. The cursor only moves
+/// forward. Returns true when the cursor moved.
+pub(crate) fn write_back_read_cursor_through(
+    state: &mut WorkerState,
+    network: &str,
+    channel: &str,
+    through: i64,
+) -> bool {
+    if state.conn.client.is_none() || state.conn.token.is_none() {
+        return false;
+    }
+    let key = window_state_key(network, channel);
+    if state
+        .windows
+        .read_cursors
+        .get(&key)
+        .is_some_and(|&cursor| cursor >= through)
+    {
+        return false;
+    }
+    state.windows.read_cursors.insert(key.clone(), through);
+    if let Ok(mut sync) = state.windows.read_cursor_sync.lock() {
+        sync.queue(key, channel, through);
+    }
+    flush_read_cursor_sync(state);
+    true
 }
 
 /// Starts one send task for each window that has a pending cursor update and
