@@ -15,6 +15,11 @@ use slint::fontique_011::{fontique, shared_collection};
 /// Common script, so the renderer asks for the script of the text around them.
 const FALLBACK_SCRIPTS: [[u8; 4]; 5] = [*b"Latn", *b"Cyrl", *b"Grek", *b"Zyyy", *b"Zinh"];
 
+/// Monochrome emoji font (OpenMoji Black, licence CC BY-SA 4.0). It covers the
+/// emoji of Unicode 17 and 18 that old system emoji fonts do not have. The
+/// licence and the source are in `assets/fonts`.
+const EMOJI_FONT: &[u8] = include_bytes!("../assets/fonts/OpenMoji-black-glyf.ttf");
+
 /// System font files that hold symbol and dingbat glyphs, most useful first.
 /// `windows_dir` is the Windows directory, when the platform has one.
 fn symbol_font_candidates(windows_dir: Option<&str>) -> Vec<PathBuf> {
@@ -67,6 +72,14 @@ pub fn register_symbol_fonts() {
             Err(err) => {
                 cordiale_core::persistence::log_line(&format!("symbol font not read: {err}"));
             }
+        }
+    }
+    // The bundled emoji font is the last fallback: it covers the systems that
+    // have no emoji font, or an old one.
+    let blob = fontique::Blob::new(std::sync::Arc::new(EMOJI_FONT));
+    for (family, _) in collection.register_fonts(blob, None) {
+        if !families.contains(&family) {
+            families.push(family);
         }
     }
     if families.is_empty() {
@@ -144,6 +157,23 @@ mod tests {
                 font_has_glyph(data, count, ch)
             });
             assert!(drawn, "no system symbol font draws U+{:04X}", ch as u32);
+        }
+    }
+
+    #[test]
+    fn the_bundled_emoji_font_draws_the_new_emoji() {
+        let face = ttf_parser::Face::parse(EMOJI_FONT, 0).expect("bundled font parses");
+        for ch in ['\u{1FAEB}', '\u{1FADD}', '\u{1F600}'] {
+            assert!(face.glyph_index(ch).is_some(), "U+{:04X}", ch as u32);
+        }
+    }
+
+    #[test]
+    fn the_picker_data_keeps_the_new_emoji_unchanged() {
+        for (ch, name) in [('\u{1FAEB}', "cracking face"), ('\u{1FADD}', "pickle")] {
+            let text = ch.to_string();
+            let emoji = emojis::get(&text).unwrap_or_else(|| panic!("{name} is in the data"));
+            assert_eq!(emoji.as_str(), text, "{name}");
         }
     }
 
