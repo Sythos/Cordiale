@@ -69,7 +69,7 @@ fn install_fallback_fonts(collection: &mut fontique::Collection, system_fonts: &
         if !path.is_file() {
             continue;
         }
-        match std::fs::read(&path) {
+        match std::fs::read(path) {
             Ok(data) => {
                 let blob = fontique::Blob::new(std::sync::Arc::new(data));
                 for (family, _) in collection.register_fonts(blob, None) {
