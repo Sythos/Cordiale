@@ -570,6 +570,11 @@ pub(crate) fn register_navigation_callbacks(
         });
     });
 
+    let tx_for_row_visible = worker_tx.clone();
+    ui.on_chat_row_visible(move |id| {
+        let _ = tx_for_row_visible.send(WorkerCommand::ChatRowVisible(id.to_string()));
+    });
+
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
     let history_for_disconnect = input_history.clone();

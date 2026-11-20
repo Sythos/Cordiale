@@ -187,6 +187,82 @@ pub(crate) fn needs_older_context(state: &WorkerState) -> bool {
     })
 }
 
+/// The read cursor and the unread count after the reader sees the message
+/// `visible_id`. The cursor goes through that message and no further, so a
+/// later message stays unread. The result is `None` when the message is
+/// unknown or already read. The count is the number of known messages after
+/// the cursor, and it never grows above `count`.
+pub(crate) fn read_through(
+    messages: &[RenderedMessage],
+    cursor: i64,
+    visible_id: i64,
+    count: u64,
+) -> Option<(i64, u64)> {
+    if visible_id <= cursor
+        || !messages
+            .iter()
+            .any(|message| message.message_id == Some(visible_id))
+    {
+        return None;
+    }
+    let after = messages
+        .iter()
+        .filter_map(|message| message.message_id)
+        .filter(|id| *id > visible_id)
+        .count();
+    Some((visible_id, count.min(after as u64)))
+}
+
+/// Marks the open channel read through the message with `id`, which the
+/// pane shows. Nothing changes while the window is hidden, while the pane
+/// still waits for its first unread message, or for a query. Other channels
+/// keep their cursor and count.
+pub(crate) fn mark_row_visible(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, id: &str) {
+    if !state.windows.chat_visible
+        || state.windows.unread_hold.get()
+        || state.windows.current_query
+        || open_locked_window(state).is_some()
+    {
+        return;
+    }
+    let Ok(id) = id.parse::<i64>() else {
+        return;
+    };
+    let Some((network, channel)) = state.windows.current_channel.clone() else {
+        return;
+    };
+    let cursor = state
+        .windows
+        .read_cursors
+        .get(&window_state_key(&network, &channel))
+        .copied()
+        .unwrap_or(i64::MIN);
+    let counts_key = window_counts_key(&network, &channel);
+    let count = state
+        .windows
+        .window_messages
+        .get(&counts_key)
+        .copied()
+        .unwrap_or(0);
+    let Some(messages) = state
+        .transcript
+        .messages
+        .get(&(network.clone(), channel.clone()))
+    else {
+        return;
+    };
+    let Some((through, remaining)) = read_through(messages, cursor, id, count) else {
+        return;
+    };
+    if !write_back_read_cursor_through(state, &network, &channel, through) {
+        return;
+    }
+    if count > 0 {
+        state.windows.window_messages.insert(counts_key, remaining);
+        refresh_network_groups(state, ui);
+    }
+}
+
 /// The row of the message with `id` in the pane, or -1 when it is not shown.
 pub(crate) fn row_of(ui: &AppWindow, id: &str) -> i32 {
     use slint::Model as _;

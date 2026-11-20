@@ -1611,6 +1611,8 @@ export component AppWindow inherits Window {
     // The text cursor offset the same estimate gives for a press on a link.
     pure callback chat-offset-hover(string, length, length, length, length, length, string, string, int) -> int;
     callback chat-read-state-changed(bool, bool);
+    // The bottom of the chat row with this message id is in the pane.
+    callback chat-row-visible(string);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
     // disconnect) start it afresh, and so does coming back with no window
@@ -5640,7 +5642,22 @@ export component AppWindow inherits Window {
                     property <int> laid-index: line-index;
                     property <length> laid-top: self.y;
                     property <length> laid-height: self.height;
-                    init => { chat-row-laid-out(line-index, self.y, self.height); }
+                    // True while the bottom edge of the row is inside the
+                    // pane. A pane that is still being rebuilt reports none.
+                    property <string> laid-id: line.reply-id;
+                    property <bool> bottom-in-view: !chat-list.resuming && line.separator == ""
+                        && self.y + self.height + chat-scroll-y > 0px
+                        && self.y + self.height + chat-scroll-y <= chat-list.visible-height + 1px;
+                    changed bottom-in-view => {
+                        if self.bottom-in-view && self.laid-id != "" { chat-row-visible(self.laid-id); }
+                    }
+                    changed laid-id => {
+                        if self.bottom-in-view && self.laid-id != "" { chat-row-visible(self.laid-id); }
+                    }
+                    init => {
+                        chat-row-laid-out(line-index, self.y, self.height);
+                        if self.bottom-in-view && self.laid-id != "" { chat-row-visible(self.laid-id); }
+                    }
                     changed laid-index => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }
                     changed laid-top => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }
                     changed laid-height => { chat-row-laid-out(self.laid-index, self.laid-top, self.laid-height); }

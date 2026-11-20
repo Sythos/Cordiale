@@ -18526,6 +18526,135 @@ fn a_channel_without_unread_messages_has_no_placement() {
 }
 
 #[test]
+fn channel_entry_starts_at_the_oldest_unread_with_three_read_rows_above() {
+    let rows = unread_rows(&[5, 6, 7, 8, 9, 10, 11]);
+    // Two unread messages: 10 and 11. Three read rows sit above 10.
+    assert_eq!(
+        unread_divider::placement(&rows, 9, false),
+        Some(unread_divider::Placement {
+            start_id: 6,
+            context: 3
+        })
+    );
+}
+
+#[test]
+fn the_cursor_stays_while_no_unread_row_is_visible() {
+    let rows = unread_rows(&[8, 9, 10, 11]);
+    // Only read rows are visible: the cursor and the count do not move.
+    assert_eq!(unread_divider::read_through(&rows, 9, 8, 2), None);
+    assert_eq!(unread_divider::read_through(&rows, 9, 9, 2), None);
+    // A row that the channel does not hold changes nothing.
+    assert_eq!(unread_divider::read_through(&rows, 9, 40, 2), None);
+}
+
+#[test]
+fn a_partly_visible_unread_range_reads_only_through_the_visible_row() {
+    let rows = unread_rows(&[9, 10, 11, 12]);
+    // The first of three unread rows is visible: two stay unread.
+    assert_eq!(unread_divider::read_through(&rows, 9, 10, 3), Some((10, 2)));
+}
+
+#[test]
+fn the_last_unread_row_clears_the_count_even_with_later_rows() {
+    let rows = unread_rows(&[9, 10, 11]);
+    assert_eq!(unread_divider::read_through(&rows, 9, 11, 2), Some((11, 0)));
+    // A later row that is not unread-range keeps its own unread state.
+    let rows = unread_rows(&[9, 10, 11, 12]);
+    assert_eq!(unread_divider::read_through(&rows, 9, 11, 3), Some((11, 1)));
+}
+
+#[test]
+fn new_messages_after_the_range_keep_the_count_until_visible() {
+    let mut rows = unread_rows(&[9, 10, 11]);
+    assert_eq!(unread_divider::read_through(&rows, 9, 11, 2), Some((11, 0)));
+    // Two live messages arrive after the read cursor moved to 11.
+    rows.extend(unread_rows(&[12, 13]));
+    assert_eq!(
+        unread_divider::read_through(&rows, 11, 12, 2),
+        Some((12, 1))
+    );
+    assert_eq!(
+        unread_divider::read_through(&rows, 12, 13, 1),
+        Some((13, 0))
+    );
+}
+
+#[test]
+fn the_count_never_grows_when_a_row_becomes_visible() {
+    let rows = unread_rows(&[9, 10, 11, 12]);
+    assert_eq!(unread_divider::read_through(&rows, 9, 10, 1), Some((10, 1)));
+    assert_eq!(unread_divider::read_through(&rows, 9, 10, 0), Some((10, 0)));
+}
+
+#[test]
+fn a_visible_row_changes_nothing_while_the_pane_holds_or_is_hidden() {
+    let mut state = WorkerState::new();
+    let key = ("net".to_string(), "#room".to_string());
+    let other = ("net".to_string(), "#other".to_string());
+    state.windows.current_channel = Some(key.clone());
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), unread_rows(&[9, 10, 11]));
+    state
+        .windows
+        .read_cursors
+        .insert(window_state_key(&key.0, &key.1), 9);
+    state
+        .windows
+        .read_cursors
+        .insert(window_state_key(&other.0, &other.1), 3);
+    state
+        .windows
+        .window_messages
+        .insert(window_counts_key(&key.0, &key.1), 2);
+    state
+        .windows
+        .window_messages
+        .insert(window_counts_key(&other.0, &other.1), 7);
+    let ui = slint::Weak::default();
+    // The pane is hidden.
+    state.windows.chat_visible = false;
+    unread_divider::mark_row_visible(&mut state, &ui, "11");
+    // The pane waits for its first unread message.
+    state.windows.chat_visible = true;
+    state.windows.unread_hold.set(true);
+    unread_divider::mark_row_visible(&mut state, &ui, "11");
+    // The id is not a message id.
+    state.windows.unread_hold.set(false);
+    unread_divider::mark_row_visible(&mut state, &ui, "");
+    assert_eq!(
+        state
+            .windows
+            .read_cursors
+            .get(&window_state_key(&key.0, &key.1)),
+        Some(&9)
+    );
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key(&key.0, &key.1)),
+        Some(&2)
+    );
+    assert_eq!(
+        state
+            .windows
+            .read_cursors
+            .get(&window_state_key(&other.0, &other.1)),
+        Some(&3)
+    );
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key(&other.0, &other.1)),
+        Some(&7)
+    );
+}
+
+#[test]
 fn late_history_moves_the_start_of_the_pane() {
     let mut rows = unread_rows(&[12]);
     assert_eq!(
