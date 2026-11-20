@@ -347,3 +347,11 @@ cargo build --release --package cordiale-ui
   <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>
 - Cicchetto, functional reference:
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>
+
+## Third-party fonts
+
+Cordiale includes the OpenMoji Black font as the last fallback font for emoji.
+It draws the emoji that an old system font does not have.
+OpenMoji is by the OpenMoji contributors (<https://openmoji.org>).
+The licence is Creative Commons Attribution-ShareAlike 4.0.
+The licence text and the source are in `crates/cordiale-ui/assets/fonts`.
