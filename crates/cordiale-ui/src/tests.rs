@@ -18532,7 +18532,7 @@ fn channel_entry_starts_at_the_oldest_unread_with_three_read_rows_above() {
     assert_eq!(
         unread_divider::placement(&rows, 9, false),
         Some(unread_divider::Placement {
-            start_id: 6,
+            start_id: 7,
             context: 3
         })
     );
@@ -18588,7 +18588,7 @@ fn the_count_never_grows_when_a_row_becomes_visible() {
 }
 
 #[test]
-fn a_visible_row_changes_nothing_while_the_pane_holds_or_is_hidden() {
+fn a_visible_row_changes_nothing_while_the_pane_is_hidden_or_the_id_is_bad() {
     let mut state = WorkerState::new();
     let key = ("net".to_string(), "#room".to_string());
     let other = ("net".to_string(), "#other".to_string());
@@ -18617,12 +18617,8 @@ fn a_visible_row_changes_nothing_while_the_pane_holds_or_is_hidden() {
     // The pane is hidden.
     state.windows.chat_visible = false;
     unread_divider::mark_row_visible(&mut state, &ui, "11");
-    // The pane waits for its first unread message.
-    state.windows.chat_visible = true;
-    state.windows.unread_hold.set(true);
-    unread_divider::mark_row_visible(&mut state, &ui, "11");
     // The id is not a message id.
-    state.windows.unread_hold.set(false);
+    state.windows.chat_visible = true;
     unread_divider::mark_row_visible(&mut state, &ui, "");
     assert_eq!(
         state

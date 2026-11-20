@@ -5643,9 +5643,11 @@ export component AppWindow inherits Window {
                     property <length> laid-top: self.y;
                     property <length> laid-height: self.height;
                     // True while the bottom edge of the row is inside the
-                    // pane. A pane that is still being rebuilt reports none.
+                    // pane. A pane that is still being rebuilt, or that
+                    // waits for its first unread message, reports none.
                     property <string> laid-id: line.reply-id;
-                    property <bool> bottom-in-view: !chat-list.resuming && line.separator == ""
+                    property <bool> bottom-in-view: !chat-list.resuming && !unread-start-hold
+                        && line.separator == ""
                         && self.y + self.height + chat-scroll-y > 0px
                         && self.y + self.height + chat-scroll-y <= chat-list.visible-height + 1px;
                     changed bottom-in-view => {

@@ -214,12 +214,11 @@ pub(crate) fn read_through(
 }
 
 /// Marks the open channel read through the message with `id`, which the
-/// pane shows. Nothing changes while the window is hidden, while the pane
-/// still waits for its first unread message, or for a query. Other channels
-/// keep their cursor and count.
+/// pane shows. Nothing changes while the window is hidden or for a query.
+/// The pane sends no row while it waits for its first unread message. Other
+/// channels keep their cursor and count.
 pub(crate) fn mark_row_visible(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, id: &str) {
     if !state.windows.chat_visible
-        || state.windows.unread_hold.get()
         || state.windows.current_query
         || open_locked_window(state).is_some()
     {
