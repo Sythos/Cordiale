@@ -72,7 +72,14 @@ User guide (plain English, no protocol details): [e2e-user-guide.md](e2e-user-gu
 5. **Copie S1 (v50).** Le porte `claim` e `copies` agiscono solo dentro l'account,
    mai su IRC. Una copia si crea solo dopo il 202 dell'originale e solo per i
    dispositivi della lista firmata al momento del 202. Il testo interno è
-   `{"t":"copy","peer":…,"body":…}`. Una copia `own` di un dispositivo non
+   `{"t":"copy","peer":…,"body":…}`. Per un file, `body` è la stringa vuota e
+   `file` è il record del file con `"t":"file"`; in lettura si accetta anche
+   `file` senza `t`. Un record file in arrivo (diretto o in una copia) può
+   non avere `sha256`: la lettura lo accetta, il tag AES-GCM autentica
+   comunque il file. Se `sha256` c'è, deve essere valido e il download deve
+   corrispondere. Cordiale invia sempre `sha256`. Prove: `e2e_file.rs`
+   `a_missing_digest_is_accepted_and_a_present_one_is_checked`, `e2e_engine.rs`
+   `a_file_without_a_digest_is_read`. Una copia `own` di un dispositivo non
    elencato o con firma non valida si scarta; con un certificato per una lista
    più nuova si rilegge la lista e si riprova. Fonte: G-PROTO 4f; CIC `wire.ts`
    (`CopyInner`). Prove: `e2e_engine.rs`
