@@ -2409,8 +2409,8 @@ msgid "Disconnected here, but the server did not confirm guest sign-out. Your ni
 msgstr "Disconnesso qui, ma il server non ha confermato l'uscita dell'ospite. Il nickname potrebbe restare riservato; riconnettiti per riprovare."
 
 msgctxt "AppWindow"
-msgid "That nickname is already in use on the network. Pick another one."
-msgstr "Quel nickname è già in uso sulla rete. Scegline un altro."
+msgid "That nickname is not available on this network. Pick another one."
+msgstr "Quel nickname non è disponibile su questa rete. Scegline un altro."
 
 msgctxt "AppWindow"
 msgid "That isn't a valid IRC nickname. Enter one in the name field."
