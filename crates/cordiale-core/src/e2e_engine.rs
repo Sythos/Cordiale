@@ -482,8 +482,8 @@ pub enum InnerKind {
     /// text: it reads as [`InnerKind::Other`].
     Text { body: String },
     /// A copy of the text that another device of the account sent to `peer`:
-    /// `{"t":"copy","peer":…,"body":…}`. A copy of a file carries the file
-    /// fields in `"file"` and no `body`.
+    /// `{"t":"copy","peer":…,"body":…}`. A copy of a file has an empty `body`
+    /// and the file fields in `"file"`, with `"t":"file"`.
     Copy { peer: String, body: String },
     /// The signed list of the sender: `{"t":"list","master":{…}}`.
     List { master: MasterBlock },

@@ -769,11 +769,15 @@ mod tests {
     fn a_malformed_descriptor_is_not_read() {
         let (good, _) = descriptor_for(b"x");
         let full = good.to_map();
-        for field in full.keys() {
+        // `sha256` is the one field that a record can omit.
+        for field in full.keys().filter(|field| *field != "sha256") {
             let mut map = full.clone();
             map.remove(field);
             assert_eq!(FileDescriptor::from_map(&map), None, "{field}");
         }
+        let mut empty = full.clone();
+        empty.insert("sha256".into(), Value::from(""));
+        assert_eq!(FileDescriptor::from_map(&empty), None);
         let mut wrong = full.clone();
         wrong.insert("size".into(), Value::from("12"));
         assert_eq!(FileDescriptor::from_map(&wrong), None);
