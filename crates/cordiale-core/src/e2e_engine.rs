@@ -604,9 +604,9 @@ impl InnerOut<'_> {
 struct CopyOut<'a> {
     t: &'a str,
     peer: &'a str,
-    /// The text of the copy. A file has none: it goes in `file`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<&'a str>,
+    /// The text of the copy. A file has none: the body is empty and the
+    /// file fields go in `file`.
+    body: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<serde_json::Map<String, Value>>,
     cid: &'a str,
@@ -2964,8 +2964,16 @@ impl E2eEngine {
                 CopyOut {
                     t: "copy",
                     peer: &job.peer,
-                    body: file.is_none().then_some(job.text.as_str()),
-                    file: file.map(|file| file.to_map()),
+                    body: if file.is_some() {
+                        ""
+                    } else {
+                        job.text.as_str()
+                    },
+                    file: file.map(|file| {
+                        let mut map = file.to_map();
+                        map.insert("t".into(), Value::from("file"));
+                        map
+                    }),
                     cid: &job.id,
                     lv: own.lv,
                     fb: fb.as_deref(),
@@ -8478,7 +8486,8 @@ mod tests {
     fn a_malformed_file_inner_message_is_not_stored() {
         let file = sample_file();
         let full = file.to_map();
-        for field in full.keys() {
+        // `sha256` is the one field that a record can omit.
+        for field in full.keys().filter(|field| *field != "sha256") {
             let mut map = full.clone();
             map.remove(field);
             map.insert("t".to_string(), Value::from("file"));
@@ -8521,16 +8530,20 @@ mod tests {
         let copy = CopyOut {
             t: "copy",
             peer: "carol",
-            body: file_descriptor(&stored)
-                .is_none()
-                .then_some(stored.as_str()),
-            file: Some(file.to_map()),
+            body: "",
+            file: Some({
+                let mut map = file.to_map();
+                map.insert("t".into(), Value::from("file"));
+                map
+            }),
             cid: "m1",
             lv: 1,
             fb: None,
         }
         .to_json();
-        assert!(!copy.contains("\"body\""));
+        let value: Value = serde_json::from_str(&copy).expect("json");
+        assert_eq!(value["body"], "");
+        assert_eq!(value["file"]["t"], "file");
         assert!(!copy.contains('\u{1}'));
         let inner = Inner::parse(copy.as_bytes()).expect("inner");
         assert_eq!(
@@ -8544,6 +8557,34 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_a_digest_is_read() {
+        let file = sample_file();
+        let mut map = file.to_map();
+        map.remove("sha256");
+        map.insert("t".to_string(), Value::from("file"));
+        let json = Value::Object(map.clone()).to_string();
+        let inner = Inner::parse(json.as_bytes()).expect("inner");
+        let InnerKind::Text { body } = inner.kind else {
+            panic!("not a file");
+        };
+        let read = file_descriptor(&body).expect("descriptor");
+        assert!(read.sha256.is_empty());
+        assert!(!body.contains("sha256"));
+        // The same record as a copy from another device, with a string body.
+        let copy =
+            serde_json::json!({"t": "copy", "peer": "carol", "body": "", "file": map, "lv": 1})
+                .to_string();
+        let inner = Inner::parse(copy.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::Copy {
+                peer: "carol".to_string(),
+                body,
+            }
+        );
+    }
+
+    #[test]
     fn a_text_inner_message_stays_a_text() {
         let json = Outgoing::Text("waves").to_json(1, None);
         assert_eq!(json, r#"{"t":"text","body":"waves","lv":1}"#);
@@ -8554,7 +8595,7 @@ mod tests {
         let copy = CopyOut {
             t: "copy",
             peer: "carol",
-            body: Some("hi"),
+            body: "hi",
             file: None,
             cid: "m1",
             lv: 1,
