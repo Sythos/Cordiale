@@ -3803,7 +3803,7 @@ export component AppWindow inherits Window {
         } else if status-kind == "guest-logout-unconfirmed" {
             return @tr("Disconnected here, but the server did not confirm guest sign-out. Your nickname may remain reserved; reconnect to try again.");
         } else if status-kind == "guest-nick-in-use" {
-            return @tr("That nickname is already in use on the network. Pick another one.");
+            return @tr("That nickname is not available on this network. Pick another one.");
         } else if status-kind == "guest-nick-invalid" {
             return @tr("That isn't a valid IRC nickname. Enter one in the name field.");
         } else if status-kind == "guest-captcha-required" {

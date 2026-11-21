@@ -28,7 +28,10 @@
 //! `{"t":"file","url","key","iv","sha256","name","mime","size","category",
 //! "expires_at"}`. `key`, `iv` and `sha256` are standard base64 without
 //! padding. `sha256` is the hash of the ciphertext. `size` is the length of
-//! the plain file: the ciphertext is 16 bytes longer.
+//! the plain file: the ciphertext is 16 bytes longer. A record from a peer
+//! can omit `sha256`: the AES-GCM tag still authenticates the file. When
+//! `sha256` is present, it must be valid and the download must match it.
+//! Records that Cordiale sends always carry `sha256`.
 //!
 //! The server sees only the ciphertext. The name, the type and the real size
 //! live in the descriptor, which only the peer devices can read.
@@ -181,6 +184,7 @@ pub struct FileDescriptor {
     pub url: String,
     pub key: String,
     pub iv: String,
+    /// The hash of the ciphertext. Empty when the record had no `sha256`.
     pub sha256: String,
     pub name: String,
     pub mime: String,
@@ -218,7 +222,10 @@ impl FileDescriptor {
             url: text("url")?,
             key: text("key")?,
             iv: text("iv")?,
-            sha256: text("sha256")?,
+            sha256: match map.get("sha256") {
+                None => String::new(),
+                Some(value) => value.as_str().filter(|text| !text.is_empty())?.to_string(),
+            },
             name: text("name")?,
             mime: text("mime")?,
             size: map.get("size")?.as_u64()?,
@@ -233,7 +240,9 @@ impl FileDescriptor {
         map.insert("url".into(), Value::from(self.url.as_str()));
         map.insert("key".into(), Value::from(self.key.as_str()));
         map.insert("iv".into(), Value::from(self.iv.as_str()));
-        map.insert("sha256".into(), Value::from(self.sha256.as_str()));
+        if !self.sha256.is_empty() {
+            map.insert("sha256".into(), Value::from(self.sha256.as_str()));
+        }
         map.insert("name".into(), Value::from(self.name.as_str()));
         map.insert("mime".into(), Value::from(self.mime.as_str()));
         map.insert("size".into(), Value::from(self.size));
@@ -249,7 +258,11 @@ impl FileDescriptor {
     pub fn check_shape(&self) -> Result<Decoded, FileError> {
         let key = decode_fixed::<KEY_LEN>(&self.key).ok_or(FileError::BadKey)?;
         let iv = decode_fixed::<IV_LEN>(&self.iv).ok_or(FileError::BadIv)?;
-        let sha256 = decode_fixed::<HASH_LEN>(&self.sha256).ok_or(FileError::BadHash)?;
+        let sha256 = if self.sha256.is_empty() {
+            None
+        } else {
+            Some(decode_fixed::<HASH_LEN>(&self.sha256).ok_or(FileError::BadHash)?)
+        };
         let category = UploadCategory::from_wire_name(&self.category).ok_or(FileError::BadField)?;
         if self.size > MAX_PLAIN_BYTES
             || !valid_mime(&self.mime)
@@ -294,7 +307,7 @@ impl FileDescriptor {
 pub struct Decoded {
     pub key: Zeroizing<[u8; KEY_LEN]>,
     pub iv: [u8; IV_LEN],
-    pub sha256: [u8; HASH_LEN],
+    pub sha256: Option<[u8; HASH_LEN]>,
     pub category: UploadCategory,
     pub expires_at: i64,
 }
@@ -305,7 +318,8 @@ pub struct ValidFile {
     pub url: reqwest::Url,
     pub key: Zeroizing<[u8; KEY_LEN]>,
     pub iv: [u8; IV_LEN],
-    pub sha256: [u8; HASH_LEN],
+    /// The expected hash of the ciphertext, when the descriptor had one.
+    pub sha256: Option<[u8; HASH_LEN]>,
     /// The display name, already cleaned.
     pub name: String,
     pub mime: String,
@@ -329,14 +343,15 @@ impl ValidFile {
     }
 
     /// Checks the downloaded bytes against the descriptor, then decrypts.
-    /// The hash is checked before the decryption starts.
+    /// The hash, when present, is checked before the decryption starts.
     pub fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, FileError> {
         if ciphertext.len() as u64 != self.ciphertext_len() {
             return Err(FileError::BadLength);
         }
-        let hash = sha256_of(ciphertext);
-        if hash != self.sha256 {
-            return Err(FileError::HashMismatch);
+        if let Some(expected) = self.sha256 {
+            if sha256_of(ciphertext) != expected {
+                return Err(FileError::HashMismatch);
+            }
         }
         let key = Key::<Aes256Gcm>::from(*self.key);
         let nonce = Nonce::<Aes256Gcm>::from(self.iv);
@@ -647,6 +662,7 @@ mod tests {
         let short = STANDARD_NO_PAD.encode([1u8; 31]);
         let long = STANDARD_NO_PAD.encode([1u8; 33]);
         for bad in [short.as_str(), long.as_str(), "", "not base64!!", "AAAA"] {
+            let hash_bad = !bad.is_empty();
             let key = FileDescriptor {
                 key: bad.to_string(),
                 ..good.clone()
@@ -661,8 +677,37 @@ mod tests {
                 sha256: bad.to_string(),
                 ..good.clone()
             };
-            assert_eq!(hash.validate(SERVER, NOW).err(), Some(FileError::BadHash));
+            if hash_bad {
+                assert_eq!(hash.validate(SERVER, NOW).err(), Some(FileError::BadHash));
+            }
         }
+    }
+
+    #[test]
+    fn a_missing_digest_is_accepted_and_a_present_one_is_checked() {
+        let (good, sealed) = descriptor_for(b"hello world");
+        let mut map = good.to_map();
+        map.remove("sha256");
+        let bare = FileDescriptor::from_map(&map).expect("descriptor without digest");
+        assert!(bare.sha256.is_empty());
+        let valid = bare.validate(SERVER, NOW).expect("valid");
+        assert_eq!(
+            valid.open(&sealed.ciphertext).expect("open"),
+            b"hello world"
+        );
+        assert!(!bare.to_map().contains_key("sha256"));
+        // A digest that is not a string is refused.
+        map.insert("sha256".into(), Value::from(5));
+        assert!(FileDescriptor::from_map(&map).is_none());
+        // A valid digest is kept and checked.
+        let valid = good.validate(SERVER, NOW).expect("valid");
+        assert!(valid.open(&sealed.ciphertext).is_ok());
+        let other = FileDescriptor {
+            sha256: STANDARD_NO_PAD.encode([9u8; HASH_LEN]),
+            ..good
+        };
+        let valid = other.validate(SERVER, NOW).expect("valid");
+        assert_eq!(valid.open(&sealed.ciphertext), Err(FileError::HashMismatch));
     }
 
     #[test]
@@ -724,11 +769,15 @@ mod tests {
     fn a_malformed_descriptor_is_not_read() {
         let (good, _) = descriptor_for(b"x");
         let full = good.to_map();
-        for field in full.keys() {
+        // `sha256` is the one field that a record can omit.
+        for field in full.keys().filter(|field| *field != "sha256") {
             let mut map = full.clone();
             map.remove(field);
             assert_eq!(FileDescriptor::from_map(&map), None, "{field}");
         }
+        let mut empty = full.clone();
+        empty.insert("sha256".into(), Value::from(""));
+        assert_eq!(FileDescriptor::from_map(&empty), None);
         let mut wrong = full.clone();
         wrong.insert("size".into(), Value::from("12"));
         assert_eq!(FileDescriptor::from_map(&wrong), None);
