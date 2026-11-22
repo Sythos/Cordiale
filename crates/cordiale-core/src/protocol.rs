@@ -70,9 +70,12 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// nothing this client reads. Protocol 61 adds the command-count route that
 /// this client does not use. Protocol 62 adds the channel send door and the
 /// address fields of `whois_bundle`, which this client ignores. Protocol 63
-/// adds `channel` on `e2e_message` rows. This client uses the highest Grappa
-/// protocol version it implements and tests.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 63;
+/// adds `channel` on `e2e_message` rows. Protocol 64 adds the `keep_nick`
+/// setting and its `keep_nick_changed` event, which this client ignores.
+/// Protocol 65 makes a DM read cursor need its query window (`422
+/// no_query_window`). This client uses the highest Grappa protocol version it
+/// implements and tests.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 65;
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores
@@ -142,12 +145,12 @@ mod tests {
     }
 
     #[test]
-    fn client_declares_protocol_63_with_the_channel_rows() {
+    fn client_declares_protocol_65_with_the_channel_rows() {
         use crate::e2e_protocol::{
             channel_allowed, channel_door_allowed, PairingOperation, CHANNEL_DOOR_MIN_PROTOCOL,
             CHANNEL_MIN_PROTOCOL, PAIRING_OFFER_MIN_PROTOCOL,
         };
-        assert_eq!(CLIENT_PROTOCOL_VERSION, 63);
+        assert_eq!(CLIENT_PROTOCOL_VERSION, 65);
         assert_eq!(CHANNEL_DOOR_MIN_PROTOCOL, 62);
         assert_eq!(CHANNEL_MIN_PROTOCOL, 63);
         assert!(channel_allowed(Some(CLIENT_PROTOCOL_VERSION)));

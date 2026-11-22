@@ -4235,8 +4235,8 @@ impl GrappaClient {
             .bearer_auth(token)
             .json(&serde_json::json!({ "message_id": message_id }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let response = reject_with_code(response).await?;
         let body = response.json::<Value>().await?;
         Ok(body
             .get("last_read_message_id")
@@ -8304,6 +8304,28 @@ mod tests {
             .await
             .expect("read cursor");
         assert_eq!(cursor, 42);
+    }
+
+    #[tokio::test]
+    async fn set_read_cursor_keeps_the_no_query_window_code() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/alice/read-cursor"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({ "error": "no_query_window" })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let err = client
+            .set_read_cursor("t", "libera", "alice", 42)
+            .await
+            .expect_err("rejected");
+        assert_eq!(err.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+        assert_eq!(err.code(), Some("no_query_window"));
     }
 
     #[tokio::test]

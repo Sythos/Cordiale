@@ -1299,10 +1299,11 @@ The event inventory has 66 kinds (with `e2e_incoming` and
 ## E2E protocollo 59: messaggio in arrivo (§4l)
 
 Il server invia `e2e_incoming` e `e2e_incoming_lost` solo a un client che
-dichiara `client_proto=59` o più; Cordiale dichiara 63 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
+dichiara `client_proto=59` o più; Cordiale dichiara 65 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
 aggiungono campi e la rotta di upload cifrato, che Cordiale usa dalla v58 (sezione «E2E files: v58»).
-Dichiarare 63 è corretto perché Cordiale legge il campo `channel` (v63) e usa la porta di invio dei canali
-(v62). Il protocollo 60 non porta nulla che Cordiale legga. La rotta dei conteggi dei comandi (v61) e i
+Dichiarare 65 è corretto perché Cordiale legge il campo `channel` (v63), usa la porta di invio dei canali
+(v62) e gestisce `422 no_query_window` (v65, sezione «Cursore di lettura di una query chiusa»). Il
+protocollo 64 (`keep_nick`, evento `keep_nick_changed`) è ignorato: un evento sconosciuto non cambia stato. Il protocollo 60 non porta nulla che Cordiale legga. La rotta dei conteggi dei comandi (v61) e i
 campi di indirizzo di `whois_bundle` (v62) non sono usati: sono campi o rotte facoltativi, ignorati.
 Il test `client_declares_protocol_63_with_the_channel_rows` (`protocol.rs`) fissa questi valori.
 
@@ -2119,3 +2120,18 @@ reale né contro un altro client con E2E dei canali.
   invia nulla (`SendPlan::Pending`); il testo in chiaro parte solo dopo la scelta esplicita dell'utente
   (`SendPlan::Plain`).
 - **Canali in chiaro.** Invariati.
+
+## Cursore di lettura di una query chiusa (§5l, v65)
+
+Dal protocollo 65 `POST /networks/:slug/channels/:nick/read-cursor` per una query chiusa risponde
+`422 no_query_window` e non salva nulla. Canali e `$server` non hanno questo vincolo.
+
+- `set_read_cursor` conserva stato e codice dell'errore (`GrappaClientError::Rejected`).
+- Il ciclo di invio (`flush_read_cursor_sync`) non ritenta `no_query_window`: chiama
+  `ReadCursorSync::reject`, che toglie l'aggiornamento in attesa solo se il suo ID non è più nuovo di quello
+  inviato. Un ID più nuovo e le altre finestre restano.
+- Chiudere una query (`handle_close_query`) o vederla sparire da `query_windows_list`
+  (`apply_query_windows_snapshot`) chiama `ReadCursorSync::retire`: la riconnessione non rimette in coda il
+  cursore.
+- Gli errori di rete e 5xx seguono il percorso di ritentativo esistente.
+- **Non verificato:** mai provato contro un Grappa 65 reale.

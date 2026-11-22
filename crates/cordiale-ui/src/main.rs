@@ -8458,6 +8458,14 @@ fn flush_read_cursor_sync(state: &mut WorkerState) {
                             sync.sent_ok(&key, send.message_id, stored);
                         }
                     }
+                    Err(err) if read_cursor_sync::is_closed_query_error(&err) => {
+                        // The query is gone: no retry, and only the matching
+                        // update ends.
+                        persistence::log_line("read cursor refused: no query window");
+                        if let Ok(mut sync) = sync.lock() {
+                            sync.reject(&key, send.message_id);
+                        }
+                    }
                     Err(err) => {
                         persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
                         failures += 1;

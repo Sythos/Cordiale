@@ -6460,6 +6460,19 @@ pub(crate) fn apply_query_windows_snapshot(
         }
     }
 
+    // A query that left the snapshot is closed: its pending cursor ends.
+    if let Ok(mut sync) = state.windows.read_cursor_sync.lock() {
+        for old in &previous {
+            let kept = find_query_window(&snapshot, &old.network, &old.target_nick).is_some()
+                || renames.iter().any(|(renamed, _)| {
+                    query_window_key(&renamed.network, &renamed.target_nick)
+                        == query_window_key(&old.network, &old.target_nick)
+                });
+            if !kept {
+                sync.retire(&window_state_key(&old.network, &old.target_nick));
+            }
+        }
+    }
     state.transcript.query_windows = snapshot;
     selected_closed
 }
