@@ -217,6 +217,13 @@ pub(crate) fn handle_close_query(state: &mut WorkerState, network: &str, nick: &
             .into_iter()
             .map(|followed| followed.target_nick),
     );
+    // The window is closing: its pending cursor ends, so no send or
+    // reconnect brings it back.
+    if let Ok(mut sync) = state.windows.read_cursor_sync.lock() {
+        for target_nick in &nicks {
+            sync.retire(&window_state_key(network, target_nick));
+        }
+    }
     for target_nick in nicks {
         send_user_verb(
             state,

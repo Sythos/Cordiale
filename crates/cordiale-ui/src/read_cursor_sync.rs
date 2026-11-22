@@ -44,6 +44,13 @@ pub(crate) struct ReadCursorSync {
     next_ticket: u64,
 }
 
+/// Whether the server refused a send because the query window is closed
+/// (`422 no_query_window`). Such a refusal is final: a retry gets the same
+/// answer.
+pub(crate) fn is_closed_query_error(err: &cordiale_core::client::GrappaClientError) -> bool {
+    err.status().map(|status| status.as_u16()) == Some(422) && err.code() == Some("no_query_window")
+}
+
 /// Delay before send number `attempt` (1 is the first retry): 1 s, 2 s, 4 s,
 /// and so on, up to 30 s.
 pub(crate) fn retry_delay(attempt: u32) -> Duration {
@@ -133,6 +140,26 @@ impl ReadCursorSync {
         }
     }
 
+    /// The server refused a send because the query window no longer exists.
+    /// The pending update ends only when its ID is not newer than the sent
+    /// ID. A newer pending ID stays. Returns true when an update ended.
+    pub(crate) fn reject(&mut self, key: &WindowKey, sent_id: i64) -> bool {
+        if self
+            .pending
+            .get(key)
+            .is_some_and(|entry| entry.message_id <= sent_id)
+        {
+            self.pending.remove(key);
+            return true;
+        }
+        false
+    }
+
+    /// The window is closed: its pending update ends, whatever its ID.
+    pub(crate) fn retire(&mut self, key: &WindowKey) {
+        self.pending.remove(key);
+    }
+
     /// The task for a window stops without confirmation. A later flush starts
     /// a new task. A task with an old ticket changes nothing.
     pub(crate) fn release(&mut self, key: &WindowKey, ticket: u64) {
@@ -178,6 +205,74 @@ mod tests {
 
     fn key(network: &str, target: &str) -> WindowKey {
         (network.to_string(), target.to_string())
+    }
+
+    #[test]
+    fn closed_query_refusal_ends_only_the_matching_update() {
+        let mut sync = ReadCursorSync::default();
+        let closed = key("net", "alice");
+        let other = key("net", "bob");
+        let channel = key("net", "#a");
+        sync.queue(closed.clone(), "alice", 10);
+        sync.queue(other.clone(), "bob", 7);
+        sync.queue(channel.clone(), "#a", 5);
+        // A newer value arrived while the send of 10 was in flight.
+        sync.queue(closed.clone(), "alice", 12);
+        assert!(!sync.reject(&closed, 10));
+        assert_eq!(sync.pending_id(&closed), Some(12));
+        // The refusal of the newer value ends it.
+        assert!(sync.reject(&closed, 12));
+        assert_eq!(sync.pending_id(&closed), None);
+        assert_eq!(sync.pending_id(&other), Some(7));
+        assert_eq!(sync.pending_id(&channel), Some(5));
+    }
+
+    #[test]
+    fn rejected_cursor_does_not_return_after_reconnect() {
+        let mut sync = ReadCursorSync::default();
+        let closed = key("net", "alice");
+        let other = key("net", "bob");
+        sync.queue(closed.clone(), "alice", 10);
+        sync.queue(other.clone(), "bob", 7);
+        assert!(sync.reject(&closed, 10));
+        // The server snapshot has no cursor for the closed query.
+        let server = HashMap::from([(other.clone(), 3)]);
+        assert_eq!(sync.reconcile(&server), vec![(other, 7)]);
+        assert_eq!(sync.pending_id(&closed), None);
+    }
+
+    #[test]
+    fn retire_drops_the_update_of_a_closed_window_only() {
+        let mut sync = ReadCursorSync::default();
+        let closed = key("net", "alice");
+        let other = key("net", "bob");
+        sync.queue(closed.clone(), "alice", 10);
+        sync.queue(other.clone(), "bob", 7);
+        let idle = sync.take_idle();
+        let ticket = idle.iter().find(|(k, _)| *k == closed).map(|(_, t)| *t);
+        sync.retire(&closed);
+        // The task of the closed window finds nothing to send and ends.
+        assert_eq!(sync.next_send(&closed, ticket.expect("ticket")), None);
+        assert_eq!(sync.pending_id(&other), Some(7));
+    }
+
+    #[test]
+    fn only_422_no_query_window_is_final() {
+        use cordiale_core::client::GrappaClientError;
+        let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
+            code: code.map(str::to_string),
+            retry_after: None,
+        };
+        assert!(is_closed_query_error(&rejected(
+            422,
+            Some("no_query_window")
+        )));
+        assert!(!is_closed_query_error(&rejected(422, Some("other"))));
+        assert!(!is_closed_query_error(&rejected(503, None)));
+        assert!(!is_closed_query_error(&GrappaClientError::InvalidUrl(
+            String::new()
+        )));
     }
 
     #[test]
