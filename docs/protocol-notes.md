@@ -1299,13 +1299,13 @@ The event inventory has 66 kinds (with `e2e_incoming` and
 ## E2E protocollo 59: messaggio in arrivo (§4l)
 
 Il server invia `e2e_incoming` e `e2e_incoming_lost` solo a un client che
-dichiara `client_proto=59` o più; Cordiale dichiara 65 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
+dichiara `client_proto=59` o più; Cordiale dichiara 67 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
 aggiungono campi e la rotta di upload cifrato, che Cordiale usa dalla v58 (sezione «E2E files: v58»).
-Dichiarare 65 è corretto perché Cordiale legge il campo `channel` (v63), usa la porta di invio dei canali
+Dichiarare 67 è corretto perché Cordiale legge il campo `channel` (v63), usa la porta di invio dei canali
 (v62) e gestisce `422 no_query_window` (v65, sezione «Cursore di lettura di una query chiusa»). Il
 protocollo 64 (`keep_nick`, evento `keep_nick_changed`) è ignorato: un evento sconosciuto non cambia stato. Il protocollo 60 non porta nulla che Cordiale legga. La rotta dei conteggi dei comandi (v61) e i
 campi di indirizzo di `whois_bundle` (v62) non sono usati: sono campi o rotte facoltativi, ignorati.
-Il test `client_declares_protocol_63_with_the_channel_rows` (`protocol.rs`) fissa questi valori.
+Il test `client_declares_protocol_67_with_the_channel_rows` (`protocol.rs`) fissa questi valori.
 
 - `e2e_incoming` (`network`, `from`, `from_did`, `to`, `msgid`) arriva una volta
   per un PKMSG o MSG su più righe, mai per uno su una riga. `to` è un id
@@ -2135,3 +2135,16 @@ Dal protocollo 65 `POST /networks/:slug/channels/:nick/read-cursor` per una quer
   cursore.
 - Gli errori di rete e 5xx seguono il percorso di ritentativo esistente.
 - **Non verificato:** mai provato contro un Grappa 65 reale.
+
+## Prefissi dei membri negli eventi `mode` (§5m, v66-v67)
+
+Dal protocollo 66 un evento `mode` che cambia la lista dei membri porta `meta.member_modes`: nick → array
+dei simboli dell'intero stato del membro dopo la riga. Il protocollo 67 cambia solo viste generate e nomi
+dei token di errore, non il JSON.
+
+- Con server 66 o più (`sends_member_modes`), `update_members_from_frame` sostituisce il prefisso di ogni
+  nick indicato (nick senza distinzione tra maiuscole e minuscole). Senza `member_modes` la lista non cambia:
+  `modes` e `args` non si leggono.
+- Un evento già mostrato (replay dopo riconnessione) non cambia la lista, per non sovrascrivere uno stato più nuovo.
+- Con server sotto il 66 o sconosciuto resta il percorso `PREFIX`/`CHANMODES` (`prefix_mode_changes`).
+- **Non verificato:** mai provato contro un Grappa 66 o 67 reale.
