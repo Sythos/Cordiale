@@ -73,9 +73,23 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// adds `channel` on `e2e_message` rows. Protocol 64 adds the `keep_nick`
 /// setting and its `keep_nick_changed` event, which this client ignores.
 /// Protocol 65 makes a DM read cursor need its query window (`422
-/// no_query_window`). This client uses the highest Grappa protocol version it
-/// implements and tests.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 65;
+/// no_query_window`). Protocol 66 adds `meta.member_modes` on live `mode`
+/// events. Protocol 67 changes generated protocol views and error token names,
+/// not the JSON wire data. This client uses the highest Grappa protocol version
+/// it implements and tests.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 67;
+
+/// The first Grappa `protocol_version` that sends `meta.member_modes` on a
+/// `mode` event. From this version the field is the only source of member
+/// prefix changes.
+pub const MEMBER_MODES_MIN_PROTOCOL_VERSION: u32 = 66;
+
+/// Whether a server that announced `protocol_version` sends
+/// `meta.member_modes`. An unknown version (`None`) counts as no: the client
+/// keeps the `PREFIX` and `CHANMODES` walker.
+pub fn sends_member_modes(protocol_version: Option<u32>) -> bool {
+    protocol_version.is_some_and(|version| version >= MEMBER_MODES_MIN_PROTOCOL_VERSION)
+}
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores
@@ -145,12 +159,20 @@ mod tests {
     }
 
     #[test]
-    fn client_declares_protocol_65_with_the_channel_rows() {
+    fn member_modes_need_a_server_at_version_66_or_newer() {
+        assert!(!sends_member_modes(None));
+        assert!(!sends_member_modes(Some(65)));
+        assert!(sends_member_modes(Some(66)));
+        assert!(sends_member_modes(Some(67)));
+    }
+
+    #[test]
+    fn client_declares_protocol_67_with_the_channel_rows() {
         use crate::e2e_protocol::{
             channel_allowed, channel_door_allowed, PairingOperation, CHANNEL_DOOR_MIN_PROTOCOL,
             CHANNEL_MIN_PROTOCOL, PAIRING_OFFER_MIN_PROTOCOL,
         };
-        assert_eq!(CLIENT_PROTOCOL_VERSION, 65);
+        assert_eq!(CLIENT_PROTOCOL_VERSION, 67);
         assert_eq!(CHANNEL_DOOR_MIN_PROTOCOL, 62);
         assert_eq!(CHANNEL_MIN_PROTOCOL, 63);
         assert!(channel_allowed(Some(CLIENT_PROTOCOL_VERSION)));
