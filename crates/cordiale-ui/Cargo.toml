@@ -16,8 +16,9 @@ rfd = "0.18"
 # GIF, WebP and BMP let `slint::Image` (which decodes with this crate) load
 # those avatars; PNG encodes images pasted from the clipboard.
 image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp", "png", "ico"] }
-# Images and text on the system clipboard, for pasting uploads.
-arboard = "3"
+# Images and text on the system clipboard, for pasting uploads. The Wayland
+# feature keeps native Wayland support: Slint 1.19 no longer turns it on.
+arboard = { version = "3", features = ["wayland-data-control"] }
 # The OS light/dark setting and its changes, to pick the day or night theme.
 dark-light = { version = "3", default-features = false }
 # Host details for the Debug page (OS version, CPU model, RAM). Only the
@@ -28,7 +29,7 @@ sysinfo = { version = "0.40.3", default-features = false, features = ["system"] 
 sys-locale = "0.3"
 iana-time-zone = "0.1"
 # Slint's defaults minus `system-tray`, which Cordiale doesn't use.
-slint = { version = "1", default-features = false, features = [
+slint = { version = "1.19", default-features = false, features = [
     "std",
     "backend-default",
     "renderer-femtovg",
@@ -40,7 +41,7 @@ slint = { version = "1", default-features = false, features = [
     # itself doesn't handle yet.
     "unstable-winit-030",
     # The shared font collection, to add symbol fonts to the font fallback.
-    "unstable-fontique-011",
+    "unstable-fontique-012",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Display width of the sidebar rows, for the sidebar's minimum width; Slint
@@ -120,5 +121,5 @@ vodozemac = "0.11.2"
 # brings the crate in.
 ttf-parser = "0.25"
 [build-dependencies]
-slint-build = "1"
+slint-build = "1.19"
 winresource = "0.1"

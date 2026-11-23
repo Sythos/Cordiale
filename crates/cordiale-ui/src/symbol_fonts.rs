@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use slint::fontique_011::{fontique, shared_collection};
+use slint::fontique_012::{fontique, shared_collection};
 
 /// Scripts whose fallback list receives the symbol fonts. Symbols have the
 /// Common script, so the renderer asks for the script of the text around them.
