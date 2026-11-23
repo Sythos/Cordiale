@@ -28,7 +28,7 @@ sysinfo = { version = "0.40.3", default-features = false, features = ["system"] 
 sys-locale = "0.3"
 iana-time-zone = "0.1"
 # Slint's defaults minus `system-tray`, which Cordiale doesn't use.
-slint = { version = "1", default-features = false, features = [
+slint = { version = "1.19",default-features = false, features = [
     "std",
     "backend-default",
     "renderer-femtovg",
@@ -40,7 +40,7 @@ slint = { version = "1", default-features = false, features = [
     # itself doesn't handle yet.
     "unstable-winit-030",
     # The shared font collection, to add symbol fonts to the font fallback.
-    "unstable-fontique-011",
+    "unstable-fontique-012",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Display width of the sidebar rows, for the sidebar's minimum width; Slint
@@ -120,5 +120,5 @@ vodozemac = "0.11.2"
 # brings the crate in.
 ttf-parser = "0.25"
 [build-dependencies]
-slint-build = "1"
+slint-build = "1.19"
 winresource = "0.1"
