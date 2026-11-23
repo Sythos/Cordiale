@@ -10,7 +10,7 @@ Check date: 14 November 2026. Command: `cargo update --dry-run`. Result: 0 packa
 All direct requirements allow the newest release:
 
 - `ffmpeg-next` `^9` (lockfile: `ffmpeg-sys-next` 9.1.1)
-- `resvg` `^0.49` (must match the `resvg` of `slint` 1.19.0)
+- `resvg` `^0.49` (must match the `resvg` of `slint` 1.19.0, which requires `^0.49.0`; `resvg` 0.50.0 exists but `slint` cannot use it)
 - `rusty_vp9` `^0.2`
 - `sysinfo` `^0.40.3`
 
@@ -34,17 +34,23 @@ Each parent crate below is at its newest release on crates.io.
 The newest `winit` is 0.31.0-beta.4.
 Cordiale needs the `unstable-winit-030` feature of `slint`, so a beta release does not replace 0.30.
 
-## Duplicate `windows-sys` versions
+## Duplicate `base64`, `unicode-width` and `windows-sys` versions
 
-Check date: 23 November 2026. Command: `cargo tree --target all -e normal,build -d`.
-The lockfile has `windows-sys` 0.52.0, 0.59.0 and 0.61.2.
-The other crates in the duplicate list (`base64`, `unicode-width`, `resvg`, `usvg`) have one version each.
-The dev-only `wiremock` 0.6.5 keeps `base64` 0.22.1 (see the table above).
+Check date: 23 November 2026, with `slint` 1.19.0.
+Command: `cargo tree --target all --all-features -e normal,build,dev -d`.
+`resvg` and `usvg` have one version each (0.49.0), the version that `slint` 1.19.0 requires.
+The other crates below keep an older version because of a parent crate.
 
 | Old version | Dependency path | Required range |
 | --- | --- | --- |
+| `base64` 0.22.1 | `wiremock` 0.6.5 (dev only, newest release) | `^0.22` |
+| `unicode-width` 0.1.14 | `ctap-hid-fido2` 3.6.1 (newest, feature `ctap-hid`) -> `pad` 0.1.6 (newest) | `^0.1` |
 | `windows-sys` 0.52.0 | `slint` -> `i-slint-backend-winit` -> `winit` 0.30.13, `glutin` 0.32.3, `glutin_egl_sys` 0.7.1 | `^0.52` |
 | `windows-sys` 0.59.0 | `slint` -> `i-slint-backend-winit` -> `winit` 0.30.13 -> `rustix` 0.38.44 (through `calloop` 0.13) | `^0.59` |
+| `windows-sys` 0.48.0 | `slint` optional `libinput` backend -> `input` 0.10 -> `udev` 0.9.3 -> `io-lifetimes` 1.0.11 | `^0.48` |
+
+`windows-sys` 0.48.0 is in `Cargo.lock` only.
+No enabled feature of Cordiale builds it.
 
 `slint` 1.19.0 does not remove these paths.
 It still uses `winit` 0.30.13, `glutin` 0.32.3 and `calloop` 0.13 on this target set.
@@ -56,8 +62,10 @@ Safe options:
 
 - Keep `slint` 1.19.0 until a `slint` release uses a `winit` that needs `windows-sys` 0.61.
 - Use `winit` 0.31 only when `slint` supports it with a stable release.
+- Replace `wiremock` in the dev tests only if a replacement keeps the same test behaviour.
+- Wait for a release of `ctap-hid-fido2` or `pad` that uses `unicode-width` 0.2.
 
-Do not use a patch or a lockfile edit to force `windows-sys` 0.61 on `winit` 0.30.
+Do not use a patch or a lockfile edit to force a newer version on these parent crates.
 
 ## Other parent crates at their newest release
 
