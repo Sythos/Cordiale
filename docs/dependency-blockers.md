@@ -17,20 +17,19 @@ All direct requirements allow the newest release:
 ## Blocked paths
 
 Each parent crate below is at its newest release on crates.io.
-The rows for `slint` were checked on 14 November 2026 against `slint` 1.18.1.
-Cordiale now uses `slint` 1.19.0, so check those rows again before you act on them.
 
 | Parent crate (version) | Constraint that blocks | Blocked packages |
 | --- | --- | --- |
-| `slint` 1.18.1 | `i-slint-core` 1.18.1 requires `accesskit` 0.24 and `parley` 0.11 | `accesskit*`, `parley*`, `fontique`, `skrifa`, `read-fonts`, `taffy`, `femtovg` and other packages of the Slint graph |
-| `slint` 1.18.1 | `i-slint-backend-winit` 1.18.1 requires `winit` 0.30.13 and `accesskit_winit` 0.33 | `smithay-client-toolkit`, `sctk-adwaita`, `x11rb*`, `zbus*`, `atspi*`, `muda` and the other platform packages of `winit` 0.30 |
+| `slint` 1.19.0 | `i-slint-core` 1.19.0 requires `accesskit` 0.25 and `parley` 0.12 | `accesskit*`, `parley*`, `fontique`, `skrifa`, `read-fonts`, `taffy`, `femtovg` and other packages of the Slint graph |
+| `slint` 1.19.0 | `i-slint-backend-winit` 1.19.0 requires `winit` 0.30.13 and `accesskit_winit` 0.34 | `smithay-client-toolkit`, `sctk-adwaita`, `x11rb*`, `zbus*`, `atspi*`, `muda` and the other platform packages of `winit` 0.30 |
 | `windows` 0.62.2 | No `windows` 0.100 release exists | `windows-*` 0.100, `windows_*` 0.53, `windows-targets` 0.53 |
 | `reqwest` 0.13.5 | Requires `tower-http` `^0.6` | `tower-http` 0.7.1 |
 | `vodozemac` 0.11.2 | Requires `hpke` 0.14 | `hpke` 0.15.1 |
 | `rodio` 0.23.0 | `cpal` 0.18.2 requires `alsa` 0.11 and `alsa-sys` 0.4 | `alsa` 0.12.1, `alsa-sys` 0.6.1 |
 | `wiremock` 0.6.5 (dev only) | Requires `deadpool` 0.12 | `deadpool` 0.13.1, `deadpool-runtime` 0.3.1 |
 | `rodio` 0.23.0, `rusty_av1d` 1.3.0, `keyring` 4.2.0 | `num-rational` 0.4 (through `rodio` and `av-data`) and `num` 0.4 (through `secret-service`) require `num-bigint` 0.4 | `num-bigint` 0.5.1 |
-| `slint` 1.18.1 | `glutin` 0.32.3 build script requires `gl_generator` 0.14, which requires `xml-rs` 0.8 | `xml-rs` 1.0.0 |
+| `slint` 1.19.0 | `i-slint-core` 1.19.0 requires `resvg` `^0.49`. Cordiale uses the same `resvg` 0.49, so the lockfile has one `resvg` and one `usvg` | `resvg` 0.50.0 |
+| `slint` 1.19.0 | `glutin` 0.32.3 build script requires `gl_generator` 0.14, which requires `xml-rs` 0.8 | `xml-rs` 1.0.0 |
 
 The newest `winit` is 0.31.0-beta.4.
 Cordiale needs the `unstable-winit-030` feature of `slint`, so a beta release does not replace 0.30.
@@ -53,9 +52,15 @@ The other crates below keep an older version because of a parent crate.
 `windows-sys` 0.48.0 is in `Cargo.lock` only.
 No enabled feature of Cordiale builds it.
 
+`slint` 1.19.0 does not remove these paths.
+It still uses `winit` 0.30.13, `glutin` 0.32.3 and `calloop` 0.13 on this target set.
+It also adds `wgpu` 30 and `naga` 30 through the Skia renderer.
+`naga` brings back `unicode-width` 0.1.14 through `codespan-reporting`.
+Cordiale uses `slint` 1.19.0. It needs `unstable-fontique-012`, Rust 1.95 and `resvg` 0.49.
+
 Safe options:
 
-- Keep `slint` 1.19.0 (the newest release) until a `slint` release uses a `winit` that needs `windows-sys` 0.61.
+- Keep `slint` 1.19.0 until a `slint` release uses a `winit` that needs `windows-sys` 0.61.
 - Use `winit` 0.31 only when `slint` supports it with a stable release.
 - Replace `wiremock` in the dev tests only if a replacement keeps the same test behaviour.
 - Wait for a release of `ctap-hid-fido2` or `pad` that uses `unicode-width` 0.2.
@@ -66,7 +71,7 @@ Do not use a patch or a lockfile edit to force a newer version on these parent c
 
 Each crate below is locked to its newest stable release on crates.io (checked on 14 November 2026).
 No newer release allows the remaining targets:
-`slint` 1.18.1, `reqwest` 0.13.5, `vodozemac` 0.11.2, `wiremock` 0.6.5, `symphonia` 0.6.1,
+`slint` 1.19.0, `reqwest` 0.13.5, `vodozemac` 0.11.2, `wiremock` 0.6.5, `symphonia` 0.6.1,
 `image` 0.25.10, `rusty_h264-decoder` 0.17.2, `keyring` 4.2.0, `dark-light` 3.0.0,
 `arboard` 3.7.0, `rusty_av1d` 1.3.0, `rodio` 0.23.0, `cpal` 0.18.2 and `dirs` 7.0.0.
 
