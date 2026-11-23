@@ -9402,6 +9402,70 @@ fn live_mode_grants_owner_before_a_snapshot() {
 }
 
 #[test]
+fn member_modes_set_the_absolute_prefix_from_protocol_66() {
+    let key = ("net".to_string(), "#c".to_string());
+    let mut state = WorkerState::new();
+    state.conn.server_protocol_version = Some(66);
+    state
+        .transcript
+        .members
+        .insert(key.clone(), roster(&[("ann", ""), ("bob", "@")]));
+    let mode = serde_json::json!({
+        "kind": "mode",
+        "meta": {
+            "modes": "+o-o",
+            "args": ["ann", "bob"],
+            "member_modes": {"ANN": ["@"], "bob": []}
+        }
+    });
+    assert!(update_members_from_frame(&mut state, &key, &mode));
+    assert_eq!(
+        state.transcript.members.get(&key),
+        Some(&roster(&[("ann", "@"), ("bob", "")]))
+    );
+}
+
+#[test]
+fn mode_without_member_modes_leaves_the_roster_from_protocol_66() {
+    let key = ("net".to_string(), "#c".to_string());
+    let mut state = WorkerState::new();
+    state.conn.server_protocol_version = Some(67);
+    state
+        .transcript
+        .members
+        .insert(key.clone(), roster(&[("alice", "")]));
+    let mode = serde_json::json!({
+        "kind": "mode",
+        "meta": {"modes": "+o!x", "args": ["alice"]}
+    });
+    assert!(!update_members_from_frame(&mut state, &key, &mode));
+    assert_eq!(
+        state.transcript.members.get(&key),
+        Some(&roster(&[("alice", "")]))
+    );
+}
+
+#[test]
+fn mode_below_protocol_66_still_uses_the_prefix_walker() {
+    let key = ("net".to_string(), "#c".to_string());
+    let mut state = WorkerState::new();
+    state.conn.server_protocol_version = Some(65);
+    state
+        .transcript
+        .members
+        .insert(key.clone(), roster(&[("ann", "")]));
+    let mode = serde_json::json!({
+        "kind": "mode",
+        "meta": {"modes": "+o", "args": ["ann"], "member_modes": {"ann": ["+"]}}
+    });
+    assert!(update_members_from_frame(&mut state, &key, &mode));
+    assert_eq!(
+        state.transcript.members.get(&key),
+        Some(&roster(&[("ann", "@")]))
+    );
+}
+
+#[test]
 fn sort_members_by_rank_groups_by_role_then_alphabetically() {
     let mut members: Vec<MemberEntry> = vec![
         ("bob".to_string(), String::new()),

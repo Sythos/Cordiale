@@ -1094,7 +1094,13 @@ pub(crate) async fn handle_frame(
     } else {
         reply_presence::track_frame(state, &key, effective_payload)
     };
-    let members_changed = update_members_from_frame(state, &key, effective_payload);
+    // A replayed `mode` row from protocol 66 holds an absolute prefix list
+    // that could overwrite a newer roster state, so it is not applied.
+    let replayed_member_modes = already_shown
+        && cordiale_core::protocol::sends_member_modes(state.conn.server_protocol_version)
+        && effective_payload.get("kind").and_then(Value::as_str) == Some("mode");
+    let members_changed =
+        !replayed_member_modes && update_members_from_frame(state, &key, effective_payload);
     if !already_shown {
         if let Some((old, new)) = parse_nick_change(effective_payload) {
             if note_peer_nick_change(state, &network, &old, &new) {
@@ -2253,6 +2259,47 @@ pub(crate) fn update_members_from_frame(
         // `meta.args` the parameters in order. Which letters take one comes
         // from the network's ISUPPORT PREFIX and CHANMODES, so a mixed
         // string like `"+bo mask nick"` lines up.
+        Some("mode")
+            if cordiale_core::protocol::sends_member_modes(state.conn.server_protocol_version) =>
+        {
+            // Protocol 66 and newer: `meta.member_modes` maps each changed
+            // nick to its whole prefix list. Without it the row changed no
+            // member, so `modes` and `args` are not read.
+            let Some(changes) = payload
+                .get("meta")
+                .and_then(|meta| meta.get("member_modes"))
+                .and_then(Value::as_object)
+            else {
+                return false;
+            };
+            let isupport = state.networks.isupport_by_network.get(&key.0);
+            let order = cordiale_core::isupport::prefix_symbol_order(isupport);
+            let casemapping = network_casemapping(state, &key.0);
+            let Some(members) = state.transcript.members.get_mut(key) else {
+                return false;
+            };
+            let mut changed = false;
+            for (target, sigils) in changes {
+                let Some(sigils) = sigils.as_array() else {
+                    continue;
+                };
+                let prefix: String = sigils.iter().filter_map(Value::as_str).collect();
+                let Some(entry) = members
+                    .iter_mut()
+                    .find(|(name, _)| casemapping.nick_eq(name, target))
+                else {
+                    continue;
+                };
+                if entry.1 != prefix {
+                    entry.1 = prefix;
+                    changed = true;
+                }
+            }
+            if changed {
+                sort_members_by_rank(members, &order);
+            }
+            changed
+        }
         Some("mode") => {
             let modes = payload
                 .get("meta")
