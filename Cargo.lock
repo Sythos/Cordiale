@@ -1203,7 +1203,7 @@ dependencies = [
  "opus-decoder",
  "qrcode",
  "raw-window-handle",
- "resvg 0.50.0",
+ "resvg",
  "rfd",
  "rodio",
  "rusty_av1d",
@@ -2808,7 +2808,7 @@ dependencies = [
  "icu_locale_core",
  "icu_provider",
  "pulldown-cmark",
- "resvg 0.48.1",
+ "resvg",
  "skrifa",
 ]
 
@@ -2834,7 +2834,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rayon",
- "resvg 0.48.1",
+ "resvg",
  "rowan",
  "rspolib",
  "skrifa",
@@ -2879,7 +2879,7 @@ dependencies = [
  "pin-weak",
  "portable-atomic",
  "raw-window-handle",
- "resvg 0.48.1",
+ "resvg",
  "rgb",
  "scopeguard",
  "skrifa",
@@ -5196,25 +5196,7 @@ dependencies = [
  "rgb",
  "svgtypes",
  "tiny-skia 0.12.0",
- "usvg 0.48.1",
- "zune-jpeg",
-]
-
-[[package]]
-name = "resvg"
-version = "0.50.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77bb4b284cf8a5c8ae721594af53387fb755d2196fddb32b2acfb4fa9251fa0c"
-dependencies = [
- "bytemuck",
- "gif",
- "image-webp",
- "log",
- "pico-args",
- "rgb",
- "svgtypes",
- "tiny-skia 0.12.0",
- "usvg 0.50.0",
+ "usvg",
  "zune-jpeg",
 ]
 
@@ -7086,25 +7068,6 @@ dependencies = [
  "unicode-script",
  "unicode-vo",
  "xmlwriter",
-]
-
-[[package]]
-name = "usvg"
-version = "0.50.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdb896f04730b97805bbc3191fc57e4bf03face0f14577dd42e783c4d8c98802"
-dependencies = [
- "data-url",
- "imagesize",
- "kurbo",
- "log",
- "pico-args",
- "roxmltree",
- "simplecss",
- "siphasher",
- "strict-num",
- "svgtypes",
- "tiny-skia-path 0.12.0",
 ]
 
 [[package]]
