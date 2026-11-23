@@ -164,7 +164,7 @@ Il controllo "sessione già vista" segue il motore di irc-olm (OLM-4,
 
 ## Versione del protocollo
 
-`CLIENT_PROTOCOL_VERSION` is 65. The client supports the per-device E2E
+`CLIENT_PROTOCOL_VERSION` is 67. The minimum supported version is 1. The client supports the per-device E2E
 format from protocol 49, inbox row flags from 50, explicit consent from 53,
 `no_such_nick` from 54, the pairing offer from 55, the `e2e_incoming` events
 from 59, the channel send door from 62, and the `channel` field of inbox rows
@@ -173,6 +173,11 @@ the address fields of `whois_bundle` from 62 are not used. Protocol 64 adds
 `keep_nick` and its `keep_nick_changed` event, which the client ignores.
 Protocol 65 adds `422 no_query_window` for the read cursor of a closed query:
 the client does not retry it and drops the pending cursor of that window. The
+Protocol 66 adds `meta.member_modes` to live `mode` events. From 66 the client
+reads only this field for member prefixes. A live `mode` event without it does
+not change the member list. A replayed event does not change it either. Below
+66 the client uses the `PREFIX` and `CHANMODES` walker. Protocol 67 changes
+generated protocol views and error token names, not the JSON wire data. The
 client sends
 this integer in the WebSocket URL. A server below 49 does not speak the per-device format, so Cordiale does
 not use E2E with that server. Consent routes and the v52/v54 events use their
