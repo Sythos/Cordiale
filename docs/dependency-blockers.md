@@ -10,7 +10,7 @@ Check date: 14 November 2026. Command: `cargo update --dry-run`. Result: 0 packa
 All direct requirements allow the newest release:
 
 - `ffmpeg-next` `^9` (lockfile: `ffmpeg-sys-next` 9.1.1)
-- `resvg` `^0.49`
+- `resvg` `^0.49` (must match the `resvg` of `slint` 1.19.0)
 - `rusty_vp9` `^0.2`
 - `sysinfo` `^0.40.3`
 
@@ -33,6 +33,31 @@ Each parent crate below is at its newest release on crates.io.
 
 The newest `winit` is 0.31.0-beta.4.
 Cordiale needs the `unstable-winit-030` feature of `slint`, so a beta release does not replace 0.30.
+
+## Duplicate `windows-sys` versions
+
+Check date: 23 November 2026. Command: `cargo tree --target all -e normal,build -d`.
+The lockfile has `windows-sys` 0.52.0, 0.59.0 and 0.61.2.
+The other crates in the duplicate list (`base64`, `unicode-width`, `resvg`, `usvg`) have one version each.
+The dev-only `wiremock` 0.6.5 keeps `base64` 0.22.1 (see the table above).
+
+| Old version | Dependency path | Required range |
+| --- | --- | --- |
+| `windows-sys` 0.52.0 | `slint` -> `i-slint-backend-winit` -> `winit` 0.30.13, `glutin` 0.32.3, `glutin_egl_sys` 0.7.1 | `^0.52` |
+| `windows-sys` 0.59.0 | `slint` -> `i-slint-backend-winit` -> `winit` 0.30.13 -> `rustix` 0.38.44 (through `calloop` 0.13) | `^0.59` |
+
+`slint` 1.19.0 does not remove these paths.
+It still uses `winit` 0.30.13, `glutin` 0.32.3 and `calloop` 0.13 on this target set.
+It also adds `wgpu` 30 and `naga` 30 through the Skia renderer.
+`naga` brings back `unicode-width` 0.1.14 through `codespan-reporting`.
+Cordiale uses `slint` 1.19.0. It needs `unstable-fontique-012`, Rust 1.95 and `resvg` 0.49.
+
+Safe options:
+
+- Keep `slint` 1.19.0 until a `slint` release uses a `winit` that needs `windows-sys` 0.61.
+- Use `winit` 0.31 only when `slint` supports it with a stable release.
+
+Do not use a patch or a lockfile edit to force `windows-sys` 0.61 on `winit` 0.30.
 
 ## Other parent crates at their newest release
 
