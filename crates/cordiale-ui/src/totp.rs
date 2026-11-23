@@ -102,6 +102,26 @@ mod tests {
     }
 
     #[test]
+    fn the_qr_code_encodes_the_uri_it_is_given() {
+        let uri = "otpauth://totp/Grappa:vjt?secret=JBSWY3DPEHPK3PXP&issuer=Grappa";
+        let (side, rgb) = qr_rgb(uri).expect("qr");
+        let side = side as usize;
+        let code = QrCode::new(uri.as_bytes()).expect("code");
+        let width = code.width();
+        assert_eq!(side, (width + 2 * QUIET_ZONE) * SCALE);
+        // The centre pixel of every module matches the module colour.
+        for (index, color) in code.to_colors().iter().enumerate() {
+            let row = index / width + QUIET_ZONE;
+            let col = index % width + QUIET_ZONE;
+            let at = ((row * SCALE + SCALE / 2) * side + col * SCALE + SCALE / 2) * 3;
+            let expected = if *color == Color::Dark { 0 } else { 0xff };
+            assert_eq!(rgb[at], expected);
+        }
+        let other = "otpauth://totp/Grappa:vjt?secret=KRSXG5CTMVRXEZLU&issuer=Grappa";
+        assert_ne!(qr_rgb(other).expect("qr").1, rgb);
+    }
+
+    #[test]
     fn refusals_explain_the_scope_and_never_look_like_a_dead_session() {
         assert_eq!(
             settings_error_key(&rejected(403, Some("client_token_scope"))),
