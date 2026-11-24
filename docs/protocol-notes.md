@@ -22,6 +22,8 @@ dall'endpoint. Il controllo live (`e2e_live_server.rs`) verifica il minimo del
 server contro la dichiarazione del client e non richiede server >= client.
 Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
 live non è dimostrata. Il test senza rete copre solo la logica per 66 e 67.
+Esito delle prove live (da compilare a ogni prova riuscita; il test stampa la
+riga con `--nocapture`): server 66: non provato; server 67: non provato.
 
 Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
 (commit `c26c77bc`), la prima release che porta il protocollo 37:
