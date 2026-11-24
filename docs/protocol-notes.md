@@ -23,7 +23,11 @@ server contro la dichiarazione del client e non richiede server >= client.
 Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
 live non è dimostrata. Il test senza rete copre solo la logica per 66 e 67.
 Esito delle prove live (da compilare a ogni prova riuscita; il test stampa la
-riga con `--nocapture`): server 66: non provato; server 67: non provato.
+riga `live check result: accepted, ...` con `--nocapture`; con
+`CORDIALE_LIVE_EXPECTED_PROTOCOL=66` o `67` il test fallisce se il server
+riporta un altro protocollo): server 66: non provato; server 67: non provato.
+Motivo (2026-11-24): la sessione di lavoro non raggiunge nessun server Grappa
+controllato; la rete ammette solo registri di pacchetti e GitHub.
 
 Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
 (commit `c26c77bc`), la prima release che porta il protocollo 37:
