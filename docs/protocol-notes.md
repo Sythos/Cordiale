@@ -12,6 +12,17 @@ Fonti:
 - **Riferimento funzionale (solo funzionalità, non architettura):**
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
+Valori dei server Grappa (2026-11-24, letti da fonti pubbliche, non da un server
+live): la release `v1.6.7` espone `protocol_version` 66 e `min_protocol_version` 1;
+`main` espone 67 e 1. Il passaggio 66→67 non cambia il JSON sul filo, quindi
+nessun nuovo gate. Cordiale dichiara 67 con minimo supportato 1. Il gate di
+`meta.member_modes` resta dal protocollo 66. I valori nell'esempio di
+`/api/config` della guida Grappa sono esempi: vanno letti dal sorgente o
+dall'endpoint. Il controllo live (`e2e_live_server.rs`) verifica il minimo del
+server contro la dichiarazione del client e non richiede server >= client.
+Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
+live non è dimostrata. Il test senza rete copre solo la logica per 66 e 67.
+
 Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
 (commit `c26c77bc`), la prima release che porta il protocollo 37:
 `protocol_version` 37, `min_protocol_version` 1 (letti dal sorgente server in

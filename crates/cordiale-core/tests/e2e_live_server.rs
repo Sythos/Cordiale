@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Opt-in checks against a real Grappa server of protocol 54.
+//! Opt-in checks against a real Grappa server of protocol 66 or 67.
 //!
 //! These tests need a server that Cordiale cannot start by itself. They are
 //! `#[ignore]` and do not run in the normal test run. Run them with
@@ -37,7 +37,7 @@
 
 use cordiale_core::client::GrappaClient;
 use cordiale_core::e2e_refusal::{E2eRefusal, E2eRouteError};
-use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
+use cordiale_core::protocol::{ServerCompatibility, CLIENT_PROTOCOL_VERSION};
 
 fn variable(name: &str) -> String {
     std::env::var(name)
@@ -45,21 +45,46 @@ fn variable(name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 54 server: see the module comment"]
+#[ignore = "needs a protocol 66 or 67 server: see the module comment"]
 async fn the_live_server_speaks_the_protocol_of_the_client() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let config = client.fetch_config().await.expect("GET /api/config");
+    // The server protocol may be lower than the client protocol. The client
+    // declaration must only reach the server minimum.
     assert!(
-        config.protocol_version >= CLIENT_PROTOCOL_VERSION,
-        "the server protocol {} is older than the client protocol {}",
-        config.protocol_version,
+        config.min_protocol_version <= CLIENT_PROTOCOL_VERSION,
+        "the server minimum {} is above the client protocol {}",
+        config.min_protocol_version,
         CLIENT_PROTOCOL_VERSION
     );
-    assert!(config.min_protocol_version <= CLIENT_PROTOCOL_VERSION);
+    let server = ServerCompatibility {
+        protocol_version: config.protocol_version,
+        min_protocol_version: config.min_protocol_version,
+    };
+    assert!(
+        server.supported_by_cordiale(),
+        "the server protocol {} is below the supported minimum",
+        config.protocol_version
+    );
+}
+
+/// The two current targets: Grappa v1.6.7 (protocol 66) and Grappa main
+/// (protocol 67). Both have minimum 1, so the client declaration of 67 is
+/// accepted by both. This check does not contact a server.
+#[test]
+fn a_client_at_protocol_67_is_accepted_by_servers_at_protocol_66_and_67() {
+    for server_protocol in [66, 67] {
+        let server = ServerCompatibility {
+            protocol_version: server_protocol,
+            min_protocol_version: 1,
+        };
+        assert!(server.min_protocol_version <= CLIENT_PROTOCOL_VERSION);
+        assert!(server.supported_by_cordiale());
+    }
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 54 server: see the module comment"]
+#[ignore = "needs a protocol 66 or 67 server: see the module comment"]
 async fn the_live_server_answers_the_device_and_list_routes_in_the_known_shapes() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let token = variable("CORDIALE_LIVE_TOKEN");
