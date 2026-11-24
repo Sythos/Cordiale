@@ -31,6 +31,9 @@
 //! - `CORDIALE_LIVE_TOKEN`: a bearer token of a test account.
 //! - `CORDIALE_LIVE_NETWORK`: the network id of that account.
 //!
+//! - `CORDIALE_LIVE_EXPECTED_PROTOCOL` (optional): the protocol of the target,
+//!   66 or 67. The first check fails if the server reports another value.
+//!
 //! Add `--nocapture` to print the server protocol and minimum of each run.
 //! Run the checks once for a server at protocol 66 and once for a server at
 //! protocol 67. Record both lines in `docs/protocol-notes.md`.
@@ -75,6 +78,22 @@ async fn the_live_server_speaks_the_protocol_of_the_client() {
         server.supported_by_cordiale(),
         "the server protocol {} is below the supported minimum",
         config.protocol_version
+    );
+    // Optional: name the target of this run (66 or 67). The run fails if the
+    // server reports a different protocol, so a result line never names a
+    // server that was not checked.
+    if let Ok(expected) = std::env::var("CORDIALE_LIVE_EXPECTED_PROTOCOL") {
+        let expected: u32 = expected
+            .parse()
+            .expect("CORDIALE_LIVE_EXPECTED_PROTOCOL must be a number");
+        assert_eq!(
+            config.protocol_version, expected,
+            "the server protocol differs from CORDIALE_LIVE_EXPECTED_PROTOCOL"
+        );
+    }
+    println!(
+        "live check result: accepted, server protocol {} (minimum {}), client protocol {}",
+        config.protocol_version, config.min_protocol_version, CLIENT_PROTOCOL_VERSION
     );
 }
 
