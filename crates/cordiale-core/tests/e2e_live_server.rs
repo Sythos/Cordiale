@@ -31,6 +31,10 @@
 //! - `CORDIALE_LIVE_TOKEN`: a bearer token of a test account.
 //! - `CORDIALE_LIVE_NETWORK`: the network id of that account.
 //!
+//! Add `--nocapture` to print the server protocol and minimum of each run.
+//! Run the checks once for a server at protocol 66 and once for a server at
+//! protocol 67. Record both lines in `docs/protocol-notes.md`.
+//!
 //! The checks only read. They do not send a message and they do not change a
 //! list or a device. A mock server is not a substitute: do not point these
 //! tests at one and call the result interoperation.
@@ -49,6 +53,12 @@ fn variable(name: &str) -> String {
 async fn the_live_server_speaks_the_protocol_of_the_client() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let config = client.fetch_config().await.expect("GET /api/config");
+    // The report line names the server that this run checked. Run with
+    // `-- --ignored --nocapture` to see it and copy it to the protocol notes.
+    println!(
+        "live check: server protocol {} (minimum {}), client protocol {}",
+        config.protocol_version, config.min_protocol_version, CLIENT_PROTOCOL_VERSION
+    );
     // The server protocol may be lower than the client protocol. The client
     // declaration must only reach the server minimum.
     assert!(
