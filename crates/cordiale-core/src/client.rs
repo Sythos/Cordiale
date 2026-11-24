@@ -4342,6 +4342,40 @@ mod tests {
         assert_eq!(config.server, "grappa");
     }
 
+    /// Offline check only: a mock server is not a live Grappa server. It runs
+    /// the real config parser on the two current targets (66 and 67, both with
+    /// minimum 1) and checks that the client declaration reaches the minimum.
+    #[tokio::test]
+    async fn fetch_config_accepts_servers_at_protocol_66_and_67() {
+        for server_protocol in [66, 67] {
+            let mock_server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/config"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "server": "grappa",
+                    "version": "test",
+                    "protocol_version": server_protocol,
+                    "min_protocol_version": 1
+                })))
+                .mount(&mock_server)
+                .await;
+
+            let config = GrappaClient::new(mock_server.uri())
+                .fetch_config()
+                .await
+                .expect("fetch_config");
+
+            assert_eq!(config.protocol_version, server_protocol);
+            assert_eq!(config.min_protocol_version, 1);
+            assert!(config.min_protocol_version <= crate::protocol::CLIENT_PROTOCOL_VERSION);
+            assert!(crate::protocol::ServerCompatibility {
+                protocol_version: config.protocol_version,
+                min_protocol_version: config.min_protocol_version,
+            }
+            .supported_by_cordiale());
+        }
+    }
+
     #[tokio::test]
     async fn login_returns_token_on_success() {
         let mock_server = MockServer::start().await;
