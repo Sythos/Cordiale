@@ -21,7 +21,9 @@ nessun nuovo gate. Cordiale dichiara 67 con minimo supportato 1. Il gate di
 dall'endpoint. Il controllo live (`e2e_live_server.rs`) verifica il minimo del
 server contro la dichiarazione del client e non richiede server >= client.
 Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
-live non è dimostrata. Il test senza rete copre solo la logica per 66 e 67.
+live non è dimostrata. I test senza rete (`e2e_live_server.rs` e
+`fetch_config_accepts_servers_at_protocol_66_and_67` in `client.rs`, con server
+simulato) coprono solo la logica e il parser per 66 e 67.
 Esito delle prove live (da compilare a ogni prova riuscita; il test stampa la
 riga `live check result: accepted, ...` con `--nocapture`; con
 `CORDIALE_LIVE_EXPECTED_PROTOCOL=66` o `67` il test fallisce se il server
