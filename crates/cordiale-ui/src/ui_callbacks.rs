@@ -836,6 +836,19 @@ pub(crate) fn register_channel_callbacks(
         });
     });
 
+    let tx_for_invite = worker_tx.clone();
+    ui.on_home_invite_open(move |link| {
+        let _ = tx_for_invite.send(WorkerCommand::OpenInvite(link.to_string()));
+    });
+    let tx_for_invite = worker_tx.clone();
+    ui.on_home_invite_join(move || {
+        let _ = tx_for_invite.send(WorkerCommand::InviteJoinAccept);
+    });
+    let tx_for_invite = worker_tx.clone();
+    ui.on_home_invite_cancel(move || {
+        let _ = tx_for_invite.send(WorkerCommand::InviteJoinCancel);
+    });
+
     let tx_for_part = worker_tx.clone();
     ui.on_channel_part_requested(move |network, channel| {
         let _ = tx_for_part.send(WorkerCommand::PartChannel {
