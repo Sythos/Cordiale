@@ -1817,6 +1817,13 @@ export component AppWindow inherits Window {
     in property <string> home-connecting: "";
     in property <string> home-available-error: "";
     in property <string> home-available-error-network: "";
+    // Channel invite links (`Open invite…`): the status key of the last
+    // failure, whether a link is being read, and the channel of the JOIN
+    // question ("" when none is open).
+    in property <string> home-invite-error: "";
+    in property <bool> home-invite-busy: false;
+    in property <string> home-invite-network: "";
+    in property <string> home-invite-channel: "";
     // The pending confirmation, `disconnect` or `remove`, for
     // `home-confirm-network` ("" when none).
     in-out property <string> home-confirm-kind: "";
@@ -2831,6 +2838,9 @@ export component AppWindow inherits Window {
     callback home-network-recover(string);
     callback home-network-connect(string);
     callback home-featured-open(string, string); // network, channel
+    callback home-invite-open(string); // pasted invite link
+    callback home-invite-join();
+    callback home-invite-cancel();
     callback send-chat-message(string);
     callback compose-text-changed(string);
     // Up (true) or Down (false) in the compose box: the recalled entry, or
@@ -3080,6 +3090,28 @@ export component AppWindow inherits Window {
             return @tr("Couldn't reconnect {}.", network);
         } else if key == "connect-failed" {
             return @tr("Couldn't connect {}.", network);
+        } else {
+            return key;
+        }
+    }
+
+    function invite-error-text(key: string) -> string {
+        if key == "invite-invalid" {
+            return @tr("This is not a valid channel invite link.");
+        } else if key == "invite-wrong-server" {
+            return @tr("This invite is for another server. Sign in to that server first.");
+        } else if key == "invite-unavailable" {
+            return @tr("This network is not available to you.");
+        } else if key == "invite-parked" {
+            return @tr("This network is not connected. Use Reconnect above, then open the invite again.");
+        } else if key == "invite-read-failed" {
+            return @tr("Could not read the network state. Try again.");
+        } else if key == "invite-not-ready" {
+            return @tr("The network did not appear yet. Try again.");
+        } else if key == "invite-attach-failed" {
+            return @tr("Could not connect the network. Try again.");
+        } else if key == "invite-join-failed" {
+            return @tr("Could not join the channel.");
         } else {
             return key;
         }
@@ -5220,6 +5252,34 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // The JOIN question of an invite link. Nothing is joined
+                    // before Join; Cancel keeps the network connected.
+                    if home-invite-channel != "" : SectionCard {
+                        icon: "✉";
+                        title: @tr("Channel invite");
+
+                        Text {
+                            text: @tr("Join {} on {}?", home-invite-channel, home-invite-network);
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 6px;
+
+                            Button {
+                                text: @tr("Cancel");
+                                init => { self.focus(); }
+                                clicked => { home-invite-cancel(); }
+                            }
+                            Button {
+                                text: @tr("Join");
+                                clicked => { home-invite-join(); }
+                            }
+                        }
+                    }
+
                     SectionCard {
                         icon: "🍇";
                         title: @tr("Welcome to Grappa");
@@ -5367,6 +5427,44 @@ export component AppWindow inherits Window {
                                 text: @tr("Disconnect");
                                 clicked => { disconnect-requested(); }
                             }
+                        }
+                    }
+
+                    SectionCard {
+                        icon: "✉";
+                        title: @tr("Open invite…");
+
+                        Text {
+                            text: @tr("Paste a channel invite link from this server.");
+                            wrap: word-wrap;
+                            color: palette-muted;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            invite-field := LineEdit {
+                                horizontal-stretch: 1;
+                                placeholder-text: @tr("Invite link");
+                                accessible-label: @tr("Invite link");
+                                accepted => {
+                                    if !home-invite-busy && self.text != "" {
+                                        home-invite-open(self.text);
+                                    }
+                                }
+                            }
+                            Button {
+                                text: @tr("Open invite…");
+                                enabled: !home-invite-busy && invite-field.text != "";
+                                clicked => { home-invite-open(invite-field.text); }
+                            }
+                        }
+                        if home-invite-error != "" : Text {
+                            text: invite-error-text(home-invite-error);
+                            wrap: word-wrap;
+                            color: theme == "dark" ? #e57373 : #c0392b;
+                            accessible-role: AccessibleRole.text;
+                            accessible-live-region: AccessibleLiveness.polite;
                         }
                     }
 

@@ -4370,3 +4370,55 @@ msgstr "Caricamento dei dati dell’account…"
 msgctxt "StartupProgress"
 msgid "Opening the main window…"
 msgstr "Apertura della finestra principale…"
+
+msgctxt "AppWindow"
+msgid "This is not a valid channel invite link."
+msgstr "Questo non è un link di invito a un canale valido."
+
+msgctxt "AppWindow"
+msgid "This invite is for another server. Sign in to that server first."
+msgstr "Questo invito è per un altro server. Accedi prima a quel server."
+
+msgctxt "AppWindow"
+msgid "This network is not available to you."
+msgstr "Questa rete non è disponibile per te."
+
+msgctxt "AppWindow"
+msgid "This network is not connected. Use Reconnect above, then open the invite again."
+msgstr "Questa rete non è connessa. Usa Riconnetti qui sopra, poi apri di nuovo l’invito."
+
+msgctxt "AppWindow"
+msgid "Could not read the network state. Try again."
+msgstr "Impossibile leggere lo stato della rete. Riprova."
+
+msgctxt "AppWindow"
+msgid "The network did not appear yet. Try again."
+msgstr "La rete non è ancora comparsa. Riprova."
+
+msgctxt "AppWindow"
+msgid "Could not connect the network. Try again."
+msgstr "Impossibile connettere la rete. Riprova."
+
+msgctxt "AppWindow"
+msgid "Could not join the channel."
+msgstr "Impossibile entrare nel canale."
+
+msgctxt "AppWindow"
+msgid "Channel invite"
+msgstr "Invito a un canale"
+
+msgctxt "AppWindow"
+msgid "Join {} on {}?"
+msgstr "Entrare in {} su {}?"
+
+msgctxt "AppWindow"
+msgid "Open invite…"
+msgstr "Apri invito…"
+
+msgctxt "AppWindow"
+msgid "Paste a channel invite link from this server."
+msgstr "Incolla un link di invito a un canale di questo server."
+
+msgctxt "AppWindow"
+msgid "Invite link"
+msgstr "Link di invito"

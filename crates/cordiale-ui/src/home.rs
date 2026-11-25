@@ -35,6 +35,8 @@ use std::collections::{HashMap, HashSet};
 
 use cordiale_core::rest::{FeaturedChannel, MeResponse};
 
+use crate::invite_link::PendingInvite;
+
 /// Who is signed in, as `GET /me` says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SubjectKind {
@@ -69,6 +71,12 @@ pub(crate) struct HomeState {
     pub(crate) featured: HashMap<String, Vec<FeaturedChannel>>,
     /// The featured channel that couldn't be joined, per network.
     pub(crate) featured_errors: HashMap<String, String>,
+    /// An invite link waiting for the answer to the JOIN question.
+    pub(crate) invite_pending: Option<PendingInvite>,
+    /// The last invite failure, as a status key.
+    pub(crate) invite_error: Option<&'static str>,
+    /// An invite is being read or attached.
+    pub(crate) invite_busy: bool,
 }
 
 impl HomeState {

@@ -43,6 +43,7 @@ mod frames;
 mod history;
 mod home;
 mod input_history;
+mod invite_link;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
 mod layout_trace;
@@ -230,6 +231,12 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    /// Home page: reads a pasted channel invite link.
+    OpenInvite(String),
+    /// The user accepted the JOIN question of the pending invite.
+    InviteJoinAccept,
+    /// The user cancelled the JOIN question of the pending invite.
+    InviteJoinCancel,
     PartChannel {
         network: String,
         channel: String,
@@ -2996,6 +3003,17 @@ async fn run_worker(
                     Some(WorkerCommand::HomeFeaturedOpen { network, channel }) => {
                         write_back_read_cursor(&mut state);
                         home_open_featured(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::OpenInvite(link)) => {
+                        write_back_read_cursor(&mut state);
+                        invite_open(&mut state, &ui, link).await;
+                    }
+                    Some(WorkerCommand::InviteJoinAccept) => {
+                        invite_join_accept(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::InviteJoinCancel) => {
+                        state.home.invite_pending = None;
+                        push_home(&state, &ui);
                     }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
@@ -9803,6 +9821,19 @@ fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let connecting = state.home.connecting.clone().unwrap_or_default();
     let (available_error_network, available_error) =
         state.home.available_error.clone().unwrap_or_default();
+    let invite_error = state.home.invite_error.unwrap_or_default();
+    let invite_busy = state.home.invite_busy;
+    let (invite_network, invite_channel) = state
+        .home
+        .invite_pending
+        .as_ref()
+        .map(|pending| {
+            (
+                pending.target.network.clone(),
+                pending.target.channel.clone(),
+            )
+        })
+        .unwrap_or_default();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<HomeNetworkRow> = rows
@@ -9842,6 +9873,10 @@ fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.set_home_connecting(connecting.into());
         ui.set_home_available_error(available_error.into());
         ui.set_home_available_error_network(available_error_network.into());
+        ui.set_home_invite_error(invite_error.into());
+        ui.set_home_invite_busy(invite_busy);
+        ui.set_home_invite_network(invite_network.into());
+        ui.set_home_invite_channel(invite_channel.into());
         // A confirmation for a network that has since gone is dropped.
         let pending = ui.get_home_confirm_network();
         if !pending.is_empty() && !attached.contains(&pending) {
@@ -10012,6 +10047,216 @@ async fn home_open_featured(
     }
     push_home(state, ui);
     handle_select_channel(state, ui, network, channel).await;
+}
+
+/// The sidebar's own spelling of a channel window, or `channel` when the
+/// sidebar has no row for it. Window states are keyed ASCII-folded, so the
+/// spelling comes from `channel_entries`.
+fn sidebar_channel_spelling(state: &WorkerState, network: &str, channel: &str) -> String {
+    let key = window_state_key(network, channel);
+    state
+        .windows
+        .channel_entries
+        .iter()
+        .find(|(known_network, known_channel, _)| {
+            window_state_key(known_network, known_channel) == key
+        })
+        .map(|(_, known_channel, _)| known_channel.clone())
+        .unwrap_or_else(|| channel.to_string())
+}
+
+/// The joined window of an invite, matched without case like IRC does.
+/// Returns the channel name with the spelling of the sidebar row.
+fn invite_joined_channel(
+    state: &WorkerState,
+    target: &invite_link::InviteTarget,
+) -> Option<String> {
+    let joined = state
+        .windows
+        .window_states
+        .get(&window_state_key(&target.network, &target.channel))
+        == Some(&ChannelWindowState::Joined);
+    joined.then(|| sidebar_channel_spelling(state, &target.network, &target.channel))
+}
+
+/// Whether `client` and `token` are still the signed-in session that an
+/// invite step started with.
+fn invite_session_is(state: &WorkerState, token: &str, base_url: &str) -> bool {
+    invite_link::same_session(
+        state.conn.token.as_deref(),
+        state.conn.client.as_ref().map(|client| client.base_url()),
+        token,
+        base_url,
+    )
+}
+
+/// Reads `/me` and the access to the network of an invite. `Err(None)`
+/// means the session changed while the request ran: the invite stops
+/// without a message. The server answer is the only source of the state.
+async fn invite_read_access(
+    state: &mut WorkerState,
+    client: &GrappaClient,
+    token: &str,
+    base_url: &str,
+    network: &str,
+) -> Result<invite_link::NetworkAccess, Option<&'static str>> {
+    let result = client.fetch_me(token).await;
+    if !invite_session_is(state, token, base_url) {
+        return Err(None);
+    }
+    match result {
+        Ok(me) => {
+            state.home.apply_me(&me);
+            Ok(invite_link::network_access(&me, network))
+        }
+        Err(err) => {
+            persistence::log_line(&format!("invite state read failed: {err:?}"));
+            Err(Some("invite-read-failed"))
+        }
+    }
+}
+
+/// Acts on the step of an invite: opens the channel, asks the JOIN
+/// question or shows why it stops. Never sends a JOIN.
+async fn invite_apply_step(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    pending: invite_link::PendingInvite,
+    step: invite_link::InviteStep,
+) {
+    match step {
+        invite_link::InviteStep::Select => {
+            let channel = invite_joined_channel(state, &pending.target)
+                .unwrap_or_else(|| pending.target.channel.clone());
+            push_home(state, ui);
+            handle_select_channel(state, ui, pending.target.network, channel).await;
+            return;
+        }
+        invite_link::InviteStep::AskJoin => state.home.invite_pending = Some(pending),
+        invite_link::InviteStep::NetworkParked => {
+            state.home.invite_error = Some("invite-parked");
+        }
+        invite_link::InviteStep::Attach | invite_link::InviteStep::Unavailable => {
+            state.home.invite_error = Some("invite-unavailable");
+        }
+    }
+    push_home(state, ui);
+}
+
+/// Home page `Open invite…`: reads the link, checks it names the server of
+/// the profile, reads the network state, attaches an available network
+/// once and asks before the JOIN.
+async fn invite_open(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, link: String) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    if state.home.invite_busy {
+        return;
+    }
+    state.home.invite_pending = None;
+    state.home.invite_error = None;
+    let base_url = client.base_url().to_string();
+    let target = match invite_link::parse_invite(&link, &base_url) {
+        Ok(target) => target,
+        Err(err) => {
+            state.home.invite_error = Some(err.key());
+            push_home(state, ui);
+            return;
+        }
+    };
+    let pending = invite_link::PendingInvite {
+        target,
+        token: token.clone(),
+        base_url: base_url.clone(),
+    };
+    state.home.invite_busy = true;
+    push_home(state, ui);
+
+    // Every try starts with a fresh read: no attach request without one.
+    let access =
+        invite_read_access(state, &client, &token, &base_url, &pending.target.network).await;
+    let access = match access {
+        Ok(access) => access,
+        Err(key) => return invite_stop(state, ui, key),
+    };
+    let joined = invite_joined_channel(state, &pending.target).is_some();
+    let mut step = invite_link::plan(access, joined);
+    if step == invite_link::InviteStep::Attach {
+        let result = client
+            .attach_network(&token, &pending.target.network)
+            .await
+            .map_err(|err| {
+                persistence::log_line(&format!("invite attach failed: {err:?}"));
+                err.status().map(|status| status.as_u16())
+            });
+        if !invite_session_is(state, &token, &base_url) {
+            return;
+        }
+        match invite_link::attach_next(result) {
+            invite_link::AttachNext::Refused(key) => return invite_stop(state, ui, Some(key)),
+            invite_link::AttachNext::Reread => {}
+        }
+        // Read the trusted state again before anything else.
+        let access =
+            invite_read_access(state, &client, &token, &base_url, &pending.target.network).await;
+        let access = match access {
+            Ok(access) => access,
+            Err(key) => return invite_stop(state, ui, key),
+        };
+        let joined = invite_joined_channel(state, &pending.target).is_some();
+        step = match invite_link::after_attach_read(access, joined) {
+            Ok(step) => step,
+            Err(key) => return invite_stop(state, ui, Some(key)),
+        };
+    }
+    state.home.invite_busy = false;
+    invite_apply_step(state, ui, pending, step).await;
+}
+
+/// Ends an invite with an error. `None` is a session change: no message,
+/// and the state of the new session stays as it is.
+fn invite_stop(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: Option<&'static str>) {
+    let Some(key) = key else {
+        return;
+    };
+    state.home.invite_busy = false;
+    state.home.invite_error = Some(key);
+    push_home(state, ui);
+}
+
+/// The user accepted the JOIN question: the only place an invite joins.
+async fn invite_join_accept(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let Some(pending) = state.home.invite_pending.take() else {
+        return;
+    };
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        push_home(state, ui);
+        return;
+    };
+    // A new account or server since the question: nothing is joined.
+    if !invite_session_is(state, &pending.token, &pending.base_url) || token != pending.token {
+        push_home(state, ui);
+        return;
+    }
+    let target = pending.target;
+    state.home.invite_error = None;
+    if let Err(err) = client
+        .join_channel(&token, &target.network, &target.channel, None)
+        .await
+    {
+        persistence::log_line(&format!("invite join failed: {err:?}"));
+        if invite_session_is(state, &token, &pending.base_url) {
+            state.home.invite_error = Some("invite-join-failed");
+            push_home(state, ui);
+        }
+        return;
+    }
+    if !invite_session_is(state, &token, &pending.base_url) {
+        return;
+    }
+    push_home(state, ui);
+    let channel = sidebar_channel_spelling(state, &target.network, &target.channel);
+    handle_select_channel(state, ui, target.network, channel).await;
 }
 
 /// Converts one already-rendered message into the Slint `ChatLine` model.

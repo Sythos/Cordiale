@@ -19146,3 +19146,47 @@ fn boot_failure_status_maps_the_failure_kind_to_a_status_kind() {
     );
     assert_eq!(boot_failure_status(None), ("boot-me-failed", String::new()));
 }
+
+#[test]
+fn invite_joined_channel_keeps_the_sidebar_spelling() {
+    let target = |channel: &str| invite_link::InviteTarget {
+        network: "libera".to_string(),
+        channel: channel.to_string(),
+    };
+    let mut state = WorkerState::new();
+    // Not known yet: nothing is joined.
+    assert_eq!(invite_joined_channel(&state, &target("#cordiale")), None);
+
+    // A pending window is not a joined one.
+    state.windows.window_states.insert(
+        window_state_key("libera", "#Cordiale"),
+        ChannelWindowState::Pending,
+    );
+    assert_eq!(invite_joined_channel(&state, &target("#cordiale")), None);
+
+    // Joined, but the sidebar has no row: the link spelling is used.
+    state.windows.window_states.insert(
+        window_state_key("libera", "#Cordiale"),
+        ChannelWindowState::Joined,
+    );
+    assert_eq!(
+        invite_joined_channel(&state, &target("#CORDIALE")),
+        Some("#CORDIALE".to_string())
+    );
+
+    // Joined with a sidebar row: its spelling wins, whatever the link says.
+    state.windows.channel_entries = vec![channel_row("libera", "#Cordiale")];
+    for link in ["#cordiale", "#CORDIALE", "#Cordiale"] {
+        assert_eq!(
+            invite_joined_channel(&state, &target(link)),
+            Some("#Cordiale".to_string())
+        );
+    }
+
+    // Another network is not the same window.
+    let other = invite_link::InviteTarget {
+        network: "oftc".to_string(),
+        channel: "#cordiale".to_string(),
+    };
+    assert_eq!(invite_joined_channel(&state, &other), None);
+}
