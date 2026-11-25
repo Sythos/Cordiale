@@ -2167,3 +2167,31 @@ dei token di errore, non il JSON.
 - Un evento già mostrato (replay dopo riconnessione) non cambia la lista, per non sovrascrivere uno stato più nuovo.
 - Con server sotto il 66 o sconosciuto resta il percorso `PREFIX`/`CHANMODES` (`prefix_mode_changes`).
 - **Non verificato:** mai provato contro un Grappa 66 o 67 reale.
+
+## Link di invito a un canale (issue 962)
+
+Cicchetto apre `?go=<rete>/<canale>`. Cordiale lo legge dal comando `Open invite…` della Home (un campo dove
+incollare il link): niente registrazione come gestore dei link HTTPS, niente riga di comando. Nessun cambio del
+formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/:slug/channels`, già in uso.
+
+- **Parser** (`invite_link.rs`): un solo parametro `go`, una rete e un canale separati da una sola `/`; il
+  valore si decodifica una volta; sono rifiutati caratteri di controllo, spazi, virgole, parti in più e canali
+  senza nome. Il link deve avere lo stesso schema, host e porta del server del profilo, altrimenti non parte
+  nessuna richiesta. Il token va solo al server del profilo, mai all'host del link.
+- **Flusso:** ogni tentativo inizia con una lettura di `/me`. Rete connessa e canale già entrato: si seleziona
+  il canale, nessuna domanda e nessun JOIN. Rete connessa, canale non entrato: domanda, JOIN solo dopo il sì.
+  Rete disponibile ma non collegata: una sola richiesta di attach, poi nuova lettura di `/me`; se la rete
+  compare, stessa domanda. Rete parcheggiata: messaggio che rimanda al Reconnect della Home, nessuna
+  riconnessione silenziosa.
+- **Errori dell'attach:** `409` (`already_attached`) è una corsa: si rilegge `/me`. Altri rifiuti 4xx, e una
+  rete non presente nelle due liste, mostrano lo stesso messaggio. Se la lettura fallisce o la rete non compare
+  si mostra un errore; il tentativo successivo rilegge prima di inviare un altro attach.
+- **Sessione:** l'invito ricorda token e server. Dopo logout, cambio account o cambio server nessun passo
+  prosegue. Annullare la domanda lascia la rete collegata.
+- **Versioni controllate (2026-11-25):** Cordiale `main` dichiara il protocollo 67 e il minimo 1
+  (`protocol.rs`); resta così, nessun bump. I numeri seguenti vengono dalla issue e non sono stati riletti sul
+  sorgente di Grappa in questa sessione: Grappa `main` 67 e minimo 1, Grappa v1.6.7 66 e minimo 1, Cordiale
+  v1.0.26 65 e minimo 1. L'esempio di `/api/config` in `CLIENT_PROTOCOL.md` ha numeri d'esempio: la versione
+  vera si legge dal sorgente e da `/api/config`.
+- **Non verificato:** le prove contro i server di prova 66 e 67 (`e2e_live_server.rs`) non sono state eseguite
+  qui, perché non c'era un server raggiungibile. Il flusso è coperto da test puri in `invite_link.rs`.
