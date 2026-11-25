@@ -10049,22 +10049,34 @@ async fn home_open_featured(
     handle_select_channel(state, ui, network, channel).await;
 }
 
+/// The sidebar's own spelling of a channel window, or `channel` when the
+/// sidebar has no row for it. Window states are keyed ASCII-folded, so the
+/// spelling comes from `channel_entries`.
+fn sidebar_channel_spelling(state: &WorkerState, network: &str, channel: &str) -> String {
+    let key = window_state_key(network, channel);
+    state
+        .windows
+        .channel_entries
+        .iter()
+        .find(|(known_network, known_channel, _)| {
+            window_state_key(known_network, known_channel) == key
+        })
+        .map(|(_, known_channel, _)| known_channel.clone())
+        .unwrap_or_else(|| channel.to_string())
+}
+
 /// The joined window of an invite, matched without case like IRC does.
-/// Returns the channel name as the window knows it.
+/// Returns the channel name with the spelling of the sidebar row.
 fn invite_joined_channel(
     state: &WorkerState,
     target: &invite_link::InviteTarget,
 ) -> Option<String> {
-    state
+    let joined = state
         .windows
         .window_states
-        .iter()
-        .find(|((network, channel), window)| {
-            *network == target.network
-                && channel.eq_ignore_ascii_case(&target.channel)
-                && matches!(window, ChannelWindowState::Joined)
-        })
-        .map(|((_, channel), _)| channel.clone())
+        .get(&window_state_key(&target.network, &target.channel))
+        == Some(&ChannelWindowState::Joined);
+    joined.then(|| sidebar_channel_spelling(state, &target.network, &target.channel))
 }
 
 /// Whether `client` and `token` are still the signed-in session that an
@@ -10243,7 +10255,8 @@ async fn invite_join_accept(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         return;
     }
     push_home(state, ui);
-    handle_select_channel(state, ui, target.network, target.channel).await;
+    let channel = sidebar_channel_spelling(state, &target.network, &target.channel);
+    handle_select_channel(state, ui, target.network, channel).await;
 }
 
 /// Converts one already-rendered message into the Slint `ChatLine` model.
