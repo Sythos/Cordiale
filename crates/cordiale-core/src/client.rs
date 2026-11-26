@@ -145,15 +145,6 @@ pub struct JoinRequest<'a> {
     pub key: Option<&'a str>,
 }
 
-/// How often a `JOIN` that follows a reconnect is sent while the network
-/// has not registered the session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JoinRetry {
-    /// The most `JOIN` requests, the first one included.
-    pub attempts: u32,
-    pub delay: Duration,
-}
-
 /// The step of a reconnect followed by a `JOIN` that failed.
 #[derive(Debug)]
 pub enum ReconnectJoinError {
@@ -4103,36 +4094,24 @@ impl GrappaClient {
         Ok(())
     }
 
-    /// Connects a network when `reconnect` is set, then joins. The server
-    /// refuses the `JOIN` with `not_registered` until the network answers
-    /// with `001`, so only that refusal is tried again, within `retry`.
-    /// Any other failure ends at once.
+    /// Connects a network when `reconnect` is set, then sends one `JOIN`.
+    /// No wait is necessary between the two: Grappa starts the session
+    /// before it answers the reconnect, and it keeps a `JOIN` until the
+    /// network registers the session (`001`).
     pub async fn reconnect_and_join(
         &self,
         token: &str,
         join: JoinRequest<'_>,
         reconnect: bool,
-        retry: JoinRetry,
     ) -> Result<(), ReconnectJoinError> {
         if reconnect {
             self.set_connection_state(token, join.network_slug, "connected", None)
                 .await
                 .map_err(ReconnectJoinError::Reconnect)?;
         }
-        let mut sent = 1;
-        loop {
-            match self
-                .join_channel(token, join.network_slug, join.channels, join.key)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(err) if err.is_not_registered() && sent < retry.attempts => {
-                    tokio::time::sleep(retry.delay).await;
-                    sent += 1;
-                }
-                Err(err) => return Err(ReconnectJoinError::Join(err)),
-            }
-        }
+        self.join_channel(token, join.network_slug, join.channels, join.key)
+            .await
+            .map_err(ReconnectJoinError::Join)
     }
 
     /// `POST /networks/:slug/channels/:channel/topic` — sets the topic.
@@ -7110,11 +7089,6 @@ mod tests {
         ResponseTemplate::new(503).set_body_json(serde_json::json!({"error": "not_registered"}))
     }
 
-    const QUICK_RETRY: JoinRetry = JoinRetry {
-        attempts: 3,
-        delay: Duration::from_millis(1),
-    };
-
     const JOIN: JoinRequest<'static> = JoinRequest {
         network_slug: "libera",
         channels: "#grappa",
@@ -7134,10 +7108,10 @@ mod tests {
             .send_message("t", "libera", "#grappa", &SendMessageRequest::plain("hi"))
             .await
             .map(|_| ());
+        // Grappa keeps a JOIN and accepts a PART before registration, so
+        // neither is in this list.
         for result in [
             send,
-            client.join_channel("t", "libera", "#grappa", None).await,
-            client.part_channel("t", "libera", "#grappa", None).await,
             client.set_topic("t", "libera", "#grappa", "text").await,
             client.change_nick("t", "libera", "nick").await,
             client.refresh_directory("t", "libera").await,
@@ -7165,7 +7139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_and_join_connects_then_retries_until_registered() {
+    async fn reconnect_and_join_connects_and_then_joins() {
         let mock_server = MockServer::start().await;
         Mock::given(method("PATCH"))
             .and(path("/networks/libera"))
@@ -7178,20 +7152,13 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/networks/libera/channels"))
-            .respond_with(not_registered())
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/networks/libera/channels"))
             .respond_with(ResponseTemplate::new(202))
             .expect(1)
             .mount(&mock_server)
             .await;
 
         GrappaClient::new(mock_server.uri())
-            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .reconnect_and_join("t", JOIN, true)
             .await
             .expect("joined");
         let requests = mock_server.received_requests().await.expect("requests");
@@ -7199,22 +7166,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_and_join_stops_after_the_last_attempt() {
+    async fn a_refused_join_is_sent_once() {
         let mock_server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
         Mock::given(method("POST"))
             .respond_with(not_registered())
-            .expect(3)
+            .expect(1)
             .mount(&mock_server)
             .await;
 
         let error = GrappaClient::new(mock_server.uri())
-            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .reconnect_and_join("t", JOIN, false)
             .await
-            .expect_err("never registered");
+            .expect_err("refused");
         assert!(matches!(
             error,
             ReconnectJoinError::Join(err) if err.is_not_registered()
@@ -7235,7 +7198,7 @@ mod tests {
             .await;
 
         let error = GrappaClient::new(mock_server.uri())
-            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .reconnect_and_join("t", JOIN, true)
             .await
             .expect_err("reconnect refused");
         assert!(matches!(error, ReconnectJoinError::Reconnect(_)));
