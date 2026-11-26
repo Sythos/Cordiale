@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use cordiale_core::rest::{FeaturedChannel, MeResponse};
 
 use crate::invite_link::PendingInvite;
+use crate::reconnect_join::{AbortOnDrop, PendingReconnectJoin};
 
 /// Who is signed in, as `GET /me` says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,6 +78,10 @@ pub(crate) struct HomeState {
     pub(crate) invite_error: Option<&'static str>,
     /// An invite is being read or attached.
     pub(crate) invite_busy: bool,
+    /// A `JOIN` waiting for the answer to the reconnect question.
+    pub(crate) reconnect_join: Option<PendingReconnectJoin>,
+    /// The accepted reconnect and `JOIN` in flight, per network.
+    pub(crate) reconnect_tasks: HashMap<String, AbortOnDrop>,
 }
 
 impl HomeState {
@@ -133,6 +138,15 @@ impl HomeState {
             .retain(|network, _| attached.contains(network.as_str()));
         self.featured_errors
             .retain(|network, _| attached.contains(network.as_str()));
+        self.reconnect_tasks
+            .retain(|network, _| attached.contains(network.as_str()));
+        if self
+            .reconnect_join
+            .as_ref()
+            .is_some_and(|pending| !attached.contains(pending.network.as_str()))
+        {
+            self.reconnect_join = None;
+        }
     }
 
     /// Key of the welcome's session-lifetime line.

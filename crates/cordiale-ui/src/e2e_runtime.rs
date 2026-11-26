@@ -25,7 +25,7 @@ use cordiale_core::e2e_engine::{
 use cordiale_core::e2e_file::{
     file_descriptor, file_row_text, is_file_text, same_url, FileDescriptor,
 };
-use cordiale_core::e2e_pacing::DropReason;
+use cordiale_core::e2e_pacing::{DropReason, SendResponse};
 use cordiale_core::e2e_pairing::{PairingOffer, PairingPush};
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
@@ -35,6 +35,7 @@ use cordiale_core::e2e_protocol::{
     NO_SUCH_NICK_MIN_PROTOCOL,
 };
 use cordiale_core::e2e_provision::{provision_device, ProvisionError};
+use cordiale_core::e2e_refusal::{E2eRefusal, E2eRouteError};
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
     ResetConfirmation,
@@ -720,10 +721,27 @@ pub(crate) fn is_locked_name(name: &str) -> bool {
 /// own text; every other failure gets the general one.
 pub(crate) fn e2e_send_error_kind(error: &EngineError) -> &'static str {
     match error {
+        EngineError::Rejected(SendResponse::NotRegistered)
+        | EngineError::Route(E2eRouteError::Refused {
+            refusal: E2eRefusal::NotRegistered,
+            ..
+        }) => NETWORK_CONNECTING,
+        EngineError::Client(error) if error.is_not_registered() => NETWORK_CONNECTING,
         EngineError::NotReady | EngineError::Paced(_) | EngineError::PeerNotCapable => {
             "e2e-not-ready"
         }
         _ => "e2e-send-failed",
+    }
+}
+
+/// The status of a failed consent request.
+fn e2e_request_error_kind(error: &E2eRouteError) -> &'static str {
+    match error {
+        E2eRouteError::Refused {
+            refusal: E2eRefusal::NotRegistered,
+            ..
+        } => NETWORK_CONNECTING,
+        _ => "e2e-request-failed",
     }
 }
 
@@ -1559,7 +1577,7 @@ pub(crate) async fn handle_e2e_request_action(
                 }
                 Err(error) => {
                     persistence::log_line(&format!("e2e consent request failed: {error:?}"));
-                    set_e2e_status(ui, "e2e-request-failed");
+                    set_e2e_status(ui, e2e_request_error_kind(&error));
                 }
             }
         }
@@ -1593,7 +1611,7 @@ pub(crate) async fn handle_e2e_request_action(
                 }
                 Err(error) => {
                     persistence::log_line(&format!("e2e consent accept failed: {error:?}"));
-                    set_e2e_status(ui, "e2e-request-failed");
+                    set_e2e_status(ui, e2e_request_error_kind(&error));
                 }
             }
         }
@@ -1617,7 +1635,12 @@ pub(crate) async fn handle_e2e_request_action(
                     state.e2e.remove_request(&network, id);
                     push_open_query_consent(state, ui);
                 }
-                Err(error) => persistence::log_line(&format!("e2e refusal failed: {error:?}")),
+                Err(error) => {
+                    persistence::log_line(&format!("e2e refusal failed: {error:?}"));
+                    if e2e_request_error_kind(&error) == NETWORK_CONNECTING {
+                        set_e2e_status(ui, NETWORK_CONNECTING);
+                    }
+                }
             }
         }
         "cancel" | "dismiss" => {
@@ -1658,7 +1681,7 @@ pub(crate) async fn handle_e2e_request_action(
                 }
                 Err(error) => {
                     persistence::log_line(&format!("e2e request dismiss failed: {error:?}"));
-                    set_e2e_status(ui, "e2e-request-failed");
+                    set_e2e_status(ui, e2e_request_error_kind(&error));
                 }
             }
         }
@@ -4391,7 +4414,18 @@ async fn send_e2e_channel(
     if let Err(error) = &result {
         // The log gets the kind of the failure, never the text.
         persistence::log_line(&format!("e2e channel send failed for {network}: {error:?}"));
-        set_e2e_status(ui, "e2e-send-failed");
+        let connecting = matches!(
+            error,
+            ChannelOpError::Send(error) if e2e_send_error_kind(error) == NETWORK_CONNECTING
+        );
+        set_e2e_status(
+            ui,
+            if connecting {
+                NETWORK_CONNECTING
+            } else {
+                "e2e-send-failed"
+            },
+        );
     } else {
         set_chat_follow_bottom(state, ui);
     }

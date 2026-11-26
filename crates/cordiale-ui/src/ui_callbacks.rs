@@ -848,6 +848,14 @@ pub(crate) fn register_channel_callbacks(
     ui.on_home_invite_cancel(move || {
         let _ = tx_for_invite.send(WorkerCommand::InviteJoinCancel);
     });
+    let tx_for_reconnect = worker_tx.clone();
+    ui.on_reconnect_join_accepted(move || {
+        let _ = tx_for_reconnect.send(WorkerCommand::ReconnectJoinAccept);
+    });
+    let tx_for_reconnect = worker_tx.clone();
+    ui.on_reconnect_join_cancelled(move || {
+        let _ = tx_for_reconnect.send(WorkerCommand::ReconnectJoinCancel);
+    });
 
     let tx_for_part = worker_tx.clone();
     ui.on_channel_part_requested(move |network, channel| {

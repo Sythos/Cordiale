@@ -63,6 +63,7 @@ mod player;
 mod queries;
 mod raster_image;
 mod read_cursor_sync;
+mod reconnect_join;
 mod reply;
 mod reply_presence;
 mod slash;
@@ -96,7 +97,8 @@ use cordiale_core::bootstrap::{
 };
 use cordiale_core::cleartext;
 use cordiale_core::client::{
-    server_url_is_safe, strip_url_secrets, GrappaClient, GrappaClientError, LoginError,
+    server_url_is_safe, strip_url_secrets, GrappaClient, GrappaClientError, JoinRequest,
+    LoginError, NOT_REGISTERED,
 };
 use cordiale_core::credentials::{
     resolve_credential_store, CredentialStore, KeyringCredentialStore,
@@ -134,6 +136,7 @@ use frames::*;
 use history::*;
 use mentions::*;
 use queries::*;
+use reconnect_join::{JoinOrigin, PendingReconnectJoin, ReconnectJoinOutcome};
 use slash::*;
 use ui_callbacks::*;
 use worker_commands::*;
@@ -237,6 +240,15 @@ enum WorkerCommand {
     InviteJoinAccept,
     /// The user cancelled the JOIN question of the pending invite.
     InviteJoinCancel,
+    /// The user accepted to reconnect a network and then join.
+    ReconnectJoinAccept,
+    /// The user cancelled that question: no request goes out.
+    ReconnectJoinCancel,
+    /// An accepted reconnect and JOIN ended.
+    ReconnectJoinDone {
+        pending: PendingReconnectJoin,
+        outcome: ReconnectJoinOutcome,
+    },
     PartChannel {
         network: String,
         channel: String,
@@ -3015,6 +3027,16 @@ async fn run_worker(
                         state.home.invite_pending = None;
                         push_home(&state, &ui);
                     }
+                    Some(WorkerCommand::ReconnectJoinAccept) => {
+                        reconnect_join_accept(&mut state, &ui, &worker_self);
+                    }
+                    Some(WorkerCommand::ReconnectJoinCancel) => {
+                        state.home.reconnect_join = None;
+                        push_home(&state, &ui);
+                    }
+                    Some(WorkerCommand::ReconnectJoinDone { pending, outcome }) => {
+                        reconnect_join_done(&mut state, &ui, pending, outcome).await;
+                    }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
                     }
@@ -4897,9 +4919,21 @@ fn set_rate_limited_status(ui: &slint::Weak<AppWindow>, wait: std::time::Duratio
     });
 }
 
-/// Reports a message post that failed: the wait a throttle (`429`) asked
-/// for when it gave one, the generic failure otherwise.
+/// The status key of an IRC write refused with `not_registered`: Grappa is
+/// still connecting to the network, so nothing was sent.
+const NETWORK_CONNECTING: &str = "network-connecting";
+
+fn set_network_connecting_status(ui: &slint::Weak<AppWindow>) {
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind(NETWORK_CONNECTING.into()));
+}
+
+/// Reports a message post that failed: the network that is still
+/// connecting, the wait a throttle (`429`) asked for when it gave one, the
+/// generic failure otherwise.
 fn set_send_failed_status(ui: &slint::Weak<AppWindow>, err: &GrappaClientError) {
+    if err.is_not_registered() {
+        return set_network_connecting_status(ui);
+    }
     match err.retry_after() {
         Some(wait) if err.status().is_some_and(|status| status.as_u16() == 429) => {
             set_rate_limited_status(ui, wait);
@@ -9823,6 +9857,12 @@ fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         state.home.available_error.clone().unwrap_or_default();
     let invite_error = state.home.invite_error.unwrap_or_default();
     let invite_busy = state.home.invite_busy;
+    let (reconnect_network, reconnect_channel) = state
+        .home
+        .reconnect_join
+        .as_ref()
+        .map(|pending| (pending.network.clone(), pending.channels.clone()))
+        .unwrap_or_default();
     let (invite_network, invite_channel) = state
         .home
         .invite_pending
@@ -9877,6 +9917,8 @@ fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.set_home_invite_busy(invite_busy);
         ui.set_home_invite_network(invite_network.into());
         ui.set_home_invite_channel(invite_channel.into());
+        ui.set_reconnect_join_network(reconnect_network.into());
+        ui.set_reconnect_join_channel(reconnect_channel.into());
         // A confirmation for a network that has since gone is dropped.
         let pending = ui.get_home_confirm_network();
         if !pending.is_empty() && !attached.contains(&pending) {
@@ -10013,9 +10055,153 @@ async fn home_connect_network(
     push_home(state, ui);
 }
 
+/// Whether the known state of `network` needs a reconnect before a JOIN.
+fn network_needs_reconnect(state: &WorkerState, network: &str) -> bool {
+    state
+        .networks
+        .network_connection_states
+        .get(network)
+        .is_some_and(|snapshot| reconnect_join::needs_reconnect(snapshot.status.wire_name()))
+}
+
+/// Asks the one question of a JOIN on a network that is not connected. No
+/// request goes out and nothing changes before the answer.
+fn ask_reconnect_join(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channels: String,
+    key: Option<String>,
+    origin: JoinOrigin,
+) {
+    let (Some(client), Some(token)) = (state.conn.client.as_ref(), state.conn.token.as_ref())
+    else {
+        return;
+    };
+    let pending = PendingReconnectJoin {
+        network,
+        channels,
+        key,
+        origin,
+        token: token.clone(),
+        base_url: client.base_url().to_string(),
+    };
+    state.home.invite_pending = None;
+    state.home.reconnect_join = Some(pending);
+    push_home(state, ui);
+}
+
+/// The user accepted: reconnects and joins in a task, so the wait for the
+/// registration never blocks the worker.
+fn reconnect_join_accept(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+) {
+    let Some(pending) = state.home.reconnect_join.take() else {
+        return;
+    };
+    let Some(client) = state.conn.client.clone() else {
+        return push_home(state, ui);
+    };
+    // A new account or server since the question: nothing is sent.
+    if !invite_session_is(state, &pending.token, &pending.base_url)
+        || !state.networks.network_ids.contains_key(&pending.network)
+    {
+        return push_home(state, ui);
+    }
+    let network = pending.network.clone();
+    // Connected meanwhile: only the JOIN is left.
+    let reconnect = network_needs_reconnect(state, &network);
+    state.home.invite_error = None;
+    state.home.row_errors.remove(&network);
+    state.home.featured_errors.remove(&network);
+    if reconnect {
+        state.home.reconnecting.insert(network.clone());
+    }
+    let worker = worker_self.clone();
+    let task = tokio::spawn(async move {
+        let join = JoinRequest {
+            network_slug: &pending.network,
+            channels: &pending.channels,
+            key: pending.key.as_deref(),
+        };
+        let result = client
+            .reconnect_and_join(&pending.token, join, reconnect, reconnect_join::JOIN_RETRY)
+            .await;
+        if let Err(err) = &result {
+            persistence::log_line(&format!("reconnect and join failed: {err:?}"));
+        }
+        let outcome = reconnect_join::outcome(&result);
+        let _ = worker.send(WorkerCommand::ReconnectJoinDone { pending, outcome });
+    });
+    state
+        .home
+        .reconnect_tasks
+        .insert(network, reconnect_join::AbortOnDrop(task.abort_handle()));
+    push_home(state, ui);
+}
+
+/// Shows how an accepted reconnect and JOIN ended. An invite and a featured
+/// channel open the joined window.
+async fn reconnect_join_done(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    pending: PendingReconnectJoin,
+    outcome: ReconnectJoinOutcome,
+) {
+    if !invite_session_is(state, &pending.token, &pending.base_url) {
+        return;
+    }
+    let PendingReconnectJoin {
+        network,
+        channels,
+        origin,
+        ..
+    } = pending;
+    state.home.reconnect_tasks.remove(&network);
+    state.home.reconnecting.remove(&network);
+    match outcome {
+        ReconnectJoinOutcome::Joined => {
+            push_home(state, ui);
+            if origin != JoinOrigin::Command {
+                let channel = sidebar_channel_spelling(state, &network, &channels);
+                write_back_read_cursor(state);
+                handle_select_channel(state, ui, network, channel).await;
+            }
+            return;
+        }
+        ReconnectJoinOutcome::ReconnectFailed => {
+            set_command_status(ui, "command-failed", format!("Reconnect {network}"));
+            state.home.row_errors.insert(network, "reconnect-failed");
+        }
+        ReconnectJoinOutcome::StillConnecting => {
+            if origin == JoinOrigin::Invite {
+                state.home.invite_error = Some(NETWORK_CONNECTING);
+            }
+            set_network_connecting_status(ui);
+        }
+        ReconnectJoinOutcome::InvalidChannel | ReconnectJoinOutcome::JoinFailed => {
+            match origin {
+                JoinOrigin::Invite => state.home.invite_error = Some("invite-join-failed"),
+                JoinOrigin::Featured => {
+                    state.home.featured_errors.insert(network, channels.clone());
+                }
+                JoinOrigin::Command => {}
+            }
+            if outcome == ReconnectJoinOutcome::InvalidChannel {
+                set_command_status(ui, "invalid-channel", channels);
+            } else {
+                set_command_status(ui, "command-failed", format!("Join {channels}"));
+            }
+        }
+    }
+    push_home(state, ui);
+}
+
 /// Home page featured channel: joined first when it isn't, then focused,
 /// like Cicchetto (the intent follows the tap). A failed join is shown on
-/// the network's row.
+/// the network's row. A network that is not connected asks first.
 async fn home_open_featured(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -10026,6 +10212,9 @@ async fn home_open_featured(
         return;
     }
     state.home.featured_errors.remove(&network);
+    if network_needs_reconnect(state, &network) {
+        return ask_reconnect_join(state, ui, network, channel, None, JoinOrigin::Featured);
+    }
     let joined = matches!(
         state
             .windows
@@ -10040,6 +10229,9 @@ async fn home_open_featured(
         };
         if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
             persistence::log_line(&format!("featured join failed: {err:?}"));
+            if err.is_not_registered() {
+                set_network_connecting_status(ui);
+            }
             state.home.featured_errors.insert(network, channel);
             push_home(state, ui);
             return;
@@ -10116,8 +10308,8 @@ async fn invite_read_access(
     }
 }
 
-/// Acts on the step of an invite: opens the channel, asks the JOIN
-/// question or shows why it stops. Never sends a JOIN.
+/// Acts on the step of an invite: opens the channel, asks the JOIN or the
+/// reconnect question, or shows why it stops. Never sends a JOIN.
 async fn invite_apply_step(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -10133,8 +10325,16 @@ async fn invite_apply_step(
             return;
         }
         invite_link::InviteStep::AskJoin => state.home.invite_pending = Some(pending),
-        invite_link::InviteStep::NetworkParked => {
-            state.home.invite_error = Some("invite-parked");
+        invite_link::InviteStep::AskReconnect => {
+            let target = pending.target;
+            return ask_reconnect_join(
+                state,
+                ui,
+                target.network,
+                target.channel,
+                None,
+                JoinOrigin::Invite,
+            );
         }
         invite_link::InviteStep::Attach | invite_link::InviteStep::Unavailable => {
             state.home.invite_error = Some("invite-unavailable");
@@ -10154,6 +10354,7 @@ async fn invite_open(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, link:
         return;
     }
     state.home.invite_pending = None;
+    state.home.reconnect_join = None;
     state.home.invite_error = None;
     let base_url = client.base_url().to_string();
     let target = match invite_link::parse_invite(&link, &base_url) {
@@ -10185,14 +10386,17 @@ async fn invite_open(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, link:
         let result = client
             .attach_network(&token, &pending.target.network)
             .await
-            .map_err(|err| {
+            .inspect_err(|err| {
                 persistence::log_line(&format!("invite attach failed: {err:?}"));
-                err.status().map(|status| status.as_u16())
             });
         if !invite_session_is(state, &token, &base_url) {
             return;
         }
-        match invite_link::attach_next(result) {
+        let refusal = result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|err| (err.status().map(|status| status.as_u16()), err.code()));
+        match invite_link::attach_next(refusal) {
             invite_link::AttachNext::Refused(key) => return invite_stop(state, ui, Some(key)),
             invite_link::AttachNext::Reread => {}
         }
@@ -10246,7 +10450,11 @@ async fn invite_join_accept(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     {
         persistence::log_line(&format!("invite join failed: {err:?}"));
         if invite_session_is(state, &token, &pending.base_url) {
-            state.home.invite_error = Some("invite-join-failed");
+            state.home.invite_error = Some(if err.is_not_registered() {
+                NETWORK_CONNECTING
+            } else {
+                "invite-join-failed"
+            });
             push_home(state, ui);
         }
         return;
@@ -13680,6 +13888,8 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
             if let Some(view) = state.panels.directory.as_mut() {
                 view.error = Some(if is_invalid_channel(&err) {
                     "directory-join-invalid"
+                } else if err.is_not_registered() {
+                    NETWORK_CONNECTING
                 } else {
                     "directory-join-failed"
                 });
@@ -13750,6 +13960,8 @@ async fn channel_link_join(
                 persistence::log_line(&format!("channel link join failed: {err:?}"));
                 if is_invalid_channel(&err) {
                     set_command_status(ui, "invalid-channel", channel.to_string());
+                } else if err.is_not_registered() {
+                    set_network_connecting_status(ui);
                 } else {
                     set_command_status(ui, "command-failed", format!("Join {channel}"));
                 }
@@ -13921,7 +14133,11 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
         if let Some(view) = state.panels.directory.as_mut() {
             if view.network == network {
                 view.refresh_pending = false;
-                view.error = Some("directory-refresh-failed");
+                view.error = Some(if err.is_not_registered() {
+                    NETWORK_CONNECTING
+                } else {
+                    "directory-refresh-failed"
+                });
             }
         }
         push_directory(state, ui, false);

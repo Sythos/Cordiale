@@ -362,7 +362,17 @@ pub(crate) async fn handle_frame(
             .as_ref()
             .and_then(|message_ref| state.panels.pending_kickbans.remove(message_ref))
         {
-            finish_kickban(state, ui, pending, &frame.payload);
+            let refused = state
+                .conn
+                .identifier
+                .as_deref()
+                .and_then(|identifier| command_error_reason(&frame, identifier));
+            // Nothing was sent: no fallback mask goes out either.
+            if refused.as_deref() == Some(NOT_REGISTERED) {
+                set_network_connecting_status(ui);
+            } else {
+                finish_kickban(state, ui, pending, &frame.payload);
+            }
             return;
         }
         if let Some(reason) = state
@@ -383,6 +393,8 @@ pub(crate) async fn handle_frame(
                 .flatten();
             if let Some(wait) = wait {
                 set_rate_limited_status(ui, wait);
+            } else if reason == NOT_REGISTERED {
+                set_network_connecting_status(ui);
             } else {
                 let _ = ui.upgrade_in_event_loop(move |ui| {
                     ui.set_status_command_hint(reason.into());

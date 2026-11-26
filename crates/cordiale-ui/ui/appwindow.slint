@@ -2841,6 +2841,12 @@ export component AppWindow inherits Window {
     callback home-invite-open(string); // pasted invite link
     callback home-invite-join();
     callback home-invite-cancel();
+    // The question before a JOIN on a network that is not connected; open
+    // while `reconnect-join-network` is set.
+    in property <string> reconnect-join-network: "";
+    in property <string> reconnect-join-channel: "";
+    callback reconnect-join-accepted();
+    callback reconnect-join-cancelled();
     callback send-chat-message(string);
     callback compose-text-changed(string);
     // Up (true) or Down (false) in the compose box: the recalled entry, or
@@ -3102,8 +3108,12 @@ export component AppWindow inherits Window {
             return @tr("This invite is for another server. Sign in to that server first.");
         } else if key == "invite-unavailable" {
             return @tr("This network is not available to you.");
-        } else if key == "invite-parked" {
-            return @tr("This network is not connected. Use Reconnect above, then open the invite again.");
+        } else if key == "invite-attach-sessions" {
+            return @tr("The server refused the network: the session limit is reached. Close another session or try again later.");
+        } else if key == "invite-attach-rate-limited" {
+            return @tr("The server refused the network: too many requests. Try again later.");
+        } else if key == "network-connecting" {
+            return @tr("Grappa is still connecting to the network. Nothing was sent. Try again when it is connected.");
         } else if key == "invite-read-failed" {
             return @tr("Could not read the network state. Try again.");
         } else if key == "invite-not-ready" {
@@ -3383,6 +3393,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't join that channel.");
         } else if directory-error == "directory-join-invalid" {
             return @tr("That channel name isn't valid.");
+        } else if directory-error == "network-connecting" {
+            return @tr("Grappa is still connecting to the network. Nothing was sent. Try again when it is connected.");
         } else {
             return directory-error;
         }
@@ -3772,6 +3784,8 @@ export component AppWindow inherits Window {
             return @tr("The server window accepts only slash commands.");
         } else if status-kind == "server-history-failed" {
             return @tr("Could not load the server messages. Live messages may still arrive.");
+        } else if status-kind == "network-connecting" {
+            return @tr("Grappa is still connecting to the network. Nothing was sent. Try again when it is connected.");
         } else if status-kind == "command-failed" {
             return @tr("{} failed.", status-command-hint);
         } else if status-kind == "invalid-channel" {
@@ -11052,6 +11066,70 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            }
+        }
+    }
+    // The reconnect question (see `reconnect-join-network`). Escape cancels.
+    if reconnect-join-network != "" : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(440px, parent.width - 32px);
+            height: min(220px, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        reconnect-join-cancelled();
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 10px;
+                    alignment: start;
+
+                    Text {
+                        text: @tr("Reconnect and join");
+                        font-size: 18px * FontScale.percent / 100;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: @tr("{} is not connected. Reconnect it and join {}?", reconnect-join-network, reconnect-join-channel);
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+
+                        Button {
+                            text: @tr("Cancel");
+                            init => { self.focus(); }
+                            clicked => { reconnect-join-cancelled(); }
+                        }
+                        Button {
+                            text: @tr("Reconnect and join");
+                            primary: true;
+                            clicked => { reconnect-join-accepted(); }
+                        }
+                    }
+                }
             }
         }
     }
