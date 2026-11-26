@@ -153,6 +153,10 @@ pub(crate) async fn run_slash_command(
         SlashCommand::Query(None) => {
             return set_command_status(ui, "command-usage-hint", "/query <nick>".to_string());
         }
+        // A network that is not connected asks before any request.
+        SlashCommand::Join { channels, key } if network_needs_reconnect(state, &network) => {
+            return ask_reconnect_join(state, ui, network, channels, key, JoinOrigin::Command);
+        }
         SlashCommand::Join { channels, key } => {
             client
                 .join_channel(&token, &network, &channels, key.as_deref())
@@ -558,6 +562,9 @@ pub(crate) async fn run_slash_command(
     };
     if let Err(err) = result {
         persistence::log_line(&format!("{label} failed: {err:?}"));
+        if err.is_not_registered() {
+            return set_network_connecting_status(ui);
+        }
         let kind = if is_invalid_channel(&err) {
             "invalid-channel"
         } else {

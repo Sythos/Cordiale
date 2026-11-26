@@ -4384,8 +4384,24 @@ msgid "This network is not available to you."
 msgstr "Esta red no está disponible para ti."
 
 msgctxt "AppWindow"
-msgid "This network is not connected. Use Reconnect above, then open the invite again."
-msgstr "Esta red no está conectada. Usa Reconectar arriba y abre la invitación de nuevo."
+msgid "The server refused the network: the session limit is reached. Close another session or try again later."
+msgstr "El servidor rechazó la red: se alcanzó el límite de sesiones. Cierra otra sesión o inténtalo más tarde."
+
+msgctxt "AppWindow"
+msgid "The server refused the network: too many requests. Try again later."
+msgstr "El servidor rechazó la red: demasiadas peticiones. Inténtalo más tarde."
+
+msgctxt "AppWindow"
+msgid "Grappa is still connecting to the network. Nothing was sent. Try again when it is connected."
+msgstr "Grappa aún se está conectando a la red. No se envió nada. Inténtalo de nuevo cuando esté conectada."
+
+msgctxt "AppWindow"
+msgid "Reconnect and join"
+msgstr "Reconectar y entrar"
+
+msgctxt "AppWindow"
+msgid "{} is not connected. Reconnect it and join {}?"
+msgstr "{} no está conectada. ¿Reconectarla y entrar en {}?"
 
 msgctxt "AppWindow"
 msgid "Could not read the network state. Try again."

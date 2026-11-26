@@ -229,6 +229,9 @@ pub(crate) async fn handle_part_channel(
             set_command_status(ui, "invalid-channel", channel);
             return;
         }
+        if error.is_not_registered() {
+            return set_network_connecting_status(ui);
+        }
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("part-failed".into()));
         return;

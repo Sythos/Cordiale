@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use cordiale_core::rest::{FeaturedChannel, MeResponse};
 
 use crate::invite_link::PendingInvite;
+use crate::reconnect_join::{AbortOnDrop, PendingReconnectJoin};
 
 /// Who is signed in, as `GET /me` says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,6 +78,13 @@ pub(crate) struct HomeState {
     pub(crate) invite_error: Option<&'static str>,
     /// An invite is being read or attached.
     pub(crate) invite_busy: bool,
+    /// A `JOIN` waiting for the answer to the reconnect question.
+    pub(crate) reconnect_join: Option<PendingReconnectJoin>,
+    /// The accepted reconnects and `JOIN`s in flight, each with its network,
+    /// under its own id: one network can have more than one.
+    pub(crate) reconnect_tasks: HashMap<u64, (String, AbortOnDrop)>,
+    /// The id of the next entry of `reconnect_tasks`.
+    pub(crate) next_reconnect_task: u64,
 }
 
 impl HomeState {
@@ -133,6 +141,22 @@ impl HomeState {
             .retain(|network, _| attached.contains(network.as_str()));
         self.featured_errors
             .retain(|network, _| attached.contains(network.as_str()));
+        self.reconnect_tasks
+            .retain(|_, (network, _)| attached.contains(network.as_str()));
+        if self
+            .reconnect_join
+            .as_ref()
+            .is_some_and(|pending| !attached.contains(pending.network.as_str()))
+        {
+            self.reconnect_join = None;
+        }
+    }
+
+    /// Whether an accepted reconnect and `JOIN` of `network` is in flight.
+    pub(crate) fn reconnect_task_runs(&self, network: &str) -> bool {
+        self.reconnect_tasks
+            .values()
+            .any(|(known, _)| known == network)
     }
 
     /// Key of the welcome's session-lifetime line.

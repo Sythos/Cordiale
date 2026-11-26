@@ -31,6 +31,8 @@
 
 use cordiale_core::rest::MeResponse;
 
+use crate::reconnect_join::needs_reconnect;
+
 /// The network and the channel a link points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InviteTarget {
@@ -208,10 +210,7 @@ pub(crate) fn network_access(me: &MeResponse, network: &str) -> NetworkAccess {
         return NetworkAccess::Unknown;
     };
     if let Some(row) = home.networks.iter().find(|row| row.slug == network) {
-        let parked = matches!(
-            row.connection_state.as_str(),
-            "parked" | "failed" | "failing"
-        );
+        let parked = needs_reconnect(&row.connection_state);
         return NetworkAccess::Attached { parked };
     }
     if home
@@ -233,9 +232,8 @@ pub(crate) enum InviteStep {
     AskJoin,
     /// Send one attach request.
     Attach,
-    /// The network is not connected: the home page shows its Reconnect
-    /// action and nothing is reconnected here.
-    NetworkParked,
+    /// The network is not connected: ask once, then reconnect and join.
+    AskReconnect,
     /// Same error for an unknown network and one the user cannot attach.
     Unavailable,
 }
@@ -243,7 +241,7 @@ pub(crate) enum InviteStep {
 /// Decides from a fresh read of `/me`.
 pub(crate) fn plan(access: NetworkAccess, joined: bool) -> InviteStep {
     match access {
-        NetworkAccess::Attached { parked: true } => InviteStep::NetworkParked,
+        NetworkAccess::Attached { parked: true } => InviteStep::AskReconnect,
         NetworkAccess::Attached { parked: false } if joined => InviteStep::Select,
         NetworkAccess::Attached { parked: false } => InviteStep::AskJoin,
         NetworkAccess::Available => InviteStep::Attach,
@@ -260,15 +258,23 @@ pub(crate) enum AttachNext {
     Refused(&'static str),
 }
 
-/// `status` is the HTTP status of a refusal, `None` for a success or a
-/// failure without a status. `409 already_attached` is a race, not an
-/// error. Other refusals of the request itself show one message.
-pub(crate) fn attach_next(result: Result<(), Option<u16>>) -> AttachNext {
-    match result {
-        Ok(()) | Err(Some(409)) => AttachNext::Reread,
-        Err(Some(400..=499)) => AttachNext::Refused("invite-unavailable"),
-        Err(_) => AttachNext::Refused("invite-attach-failed"),
+/// A refusal is its HTTP status (`None` for a failure without one) and the
+/// `error` code of its body. `409 already_attached` is a race, not an
+/// error. A known code shows its reason. The code itself is never shown: an
+/// unknown one gets the message of its status.
+pub(crate) fn attach_next(result: Result<(), (Option<u16>, Option<&str>)>) -> AttachNext {
+    let Err((status, code)) = result else {
+        return AttachNext::Reread;
+    };
+    if status == Some(409) {
+        return AttachNext::Reread;
     }
+    AttachNext::Refused(match (code, status) {
+        (Some("too_many_sessions" | "ip_cap_exceeded"), _) => "invite-attach-sessions",
+        (Some("rate_limited"), _) => "invite-attach-rate-limited",
+        (_, Some(400..=499)) => "invite-unavailable",
+        _ => "invite-attach-failed",
+    })
 }
 
 /// The step after the second read of `/me`. The network must be present;
@@ -469,9 +475,9 @@ mod tests {
         assert_eq!(plan(live, true), InviteStep::Select);
         // Connected, not joined: ask first.
         assert_eq!(plan(live, false), InviteStep::AskJoin);
-        // Parked: show the Reconnect action, even when joined.
-        assert_eq!(plan(parked, true), InviteStep::NetworkParked);
-        assert_eq!(plan(parked, false), InviteStep::NetworkParked);
+        // Parked: ask to reconnect and join, even when joined.
+        assert_eq!(plan(parked, true), InviteStep::AskReconnect);
+        assert_eq!(plan(parked, false), InviteStep::AskReconnect);
         // Available: one attach request, no dialog.
         assert_eq!(plan(NetworkAccess::Available, false), InviteStep::Attach);
         // Unknown or not allowed: one error.
@@ -482,22 +488,44 @@ mod tests {
     fn attach_answers() {
         assert_eq!(attach_next(Ok(())), AttachNext::Reread);
         // The race: another client attached first.
-        assert_eq!(attach_next(Err(Some(409))), AttachNext::Reread);
-        // Denied, unknown or invalid: one message.
+        assert_eq!(
+            attach_next(Err((Some(409), Some("already_attached")))),
+            AttachNext::Reread
+        );
+        // Denied, unknown or invalid, with no known reason: one message.
         for status in [400, 401, 403, 404, 422] {
+            for code in [None, Some("new_reason")] {
+                assert_eq!(
+                    attach_next(Err((Some(status), code))),
+                    AttachNext::Refused("invite-unavailable")
+                );
+            }
+        }
+        for failure in [
+            (Some(500), None),
+            (Some(503), Some("new_reason")),
+            (None, None),
+        ] {
             assert_eq!(
-                attach_next(Err(Some(status))),
-                AttachNext::Refused("invite-unavailable")
+                attach_next(Err(failure)),
+                AttachNext::Refused("invite-attach-failed")
             );
         }
-        assert_eq!(
-            attach_next(Err(Some(500))),
-            AttachNext::Refused("invite-attach-failed")
-        );
-        assert_eq!(
-            attach_next(Err(None)),
-            AttachNext::Refused("invite-attach-failed")
-        );
+    }
+
+    #[test]
+    fn a_known_attach_reason_has_its_own_message() {
+        for (status, code, key) in [
+            (503, "too_many_sessions", "invite-attach-sessions"),
+            (429, "ip_cap_exceeded", "invite-attach-sessions"),
+            (429, "rate_limited", "invite-attach-rate-limited"),
+        ] {
+            assert_eq!(
+                attach_next(Err((Some(status), Some(code)))),
+                AttachNext::Refused(key),
+                "{code}"
+            );
+        }
     }
 
     #[test]
@@ -507,7 +535,7 @@ mod tests {
         assert_eq!(after_attach_read(live, true), Ok(InviteStep::Select));
         assert_eq!(
             after_attach_read(NetworkAccess::Attached { parked: true }, false),
-            Ok(InviteStep::NetworkParked)
+            Ok(InviteStep::AskReconnect)
         );
         assert_eq!(
             after_attach_read(NetworkAccess::Available, false),
