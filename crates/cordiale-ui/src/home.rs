@@ -80,8 +80,11 @@ pub(crate) struct HomeState {
     pub(crate) invite_busy: bool,
     /// A `JOIN` waiting for the answer to the reconnect question.
     pub(crate) reconnect_join: Option<PendingReconnectJoin>,
-    /// The accepted reconnect and `JOIN` in flight, per network.
-    pub(crate) reconnect_tasks: HashMap<String, AbortOnDrop>,
+    /// The accepted reconnects and `JOIN`s in flight, each with its network,
+    /// under its own id: one network can have more than one.
+    pub(crate) reconnect_tasks: HashMap<u64, (String, AbortOnDrop)>,
+    /// The id of the next entry of `reconnect_tasks`.
+    pub(crate) next_reconnect_task: u64,
 }
 
 impl HomeState {
@@ -139,7 +142,7 @@ impl HomeState {
         self.featured_errors
             .retain(|network, _| attached.contains(network.as_str()));
         self.reconnect_tasks
-            .retain(|network, _| attached.contains(network.as_str()));
+            .retain(|_, (network, _)| attached.contains(network.as_str()));
         if self
             .reconnect_join
             .as_ref()
@@ -147,6 +150,13 @@ impl HomeState {
         {
             self.reconnect_join = None;
         }
+    }
+
+    /// Whether an accepted reconnect and `JOIN` of `network` is in flight.
+    pub(crate) fn reconnect_task_runs(&self, network: &str) -> bool {
+        self.reconnect_tasks
+            .values()
+            .any(|(known, _)| known == network)
     }
 
     /// Key of the welcome's session-lifetime line.

@@ -5650,6 +5650,39 @@ fn an_accepted_reconnect_connects_and_then_joins() {
 }
 
 #[test]
+fn two_accepted_joins_on_one_network_both_run() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = parked_network_state(&url);
+    let runtime = network_test_runtime();
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    // The second question comes before the first operation ends.
+    for _ in 0..2 {
+        join_command(&mut state, &runtime);
+        runtime.block_on(async { reconnect_join_accept(&mut state, &ui, &worker_tx) });
+    }
+    // Only the tasks hold a sender now: an aborted task cannot block the wait.
+    drop(worker_tx);
+
+    // The first result leaves the other operation and the row state in place.
+    for left in [1, 0] {
+        let Some(WorkerCommand::ReconnectJoinDone {
+            id,
+            pending,
+            outcome,
+        }) = runtime.block_on(worker_rx.recv())
+        else {
+            panic!("no result of an accepted join");
+        };
+        assert_eq!(outcome, ReconnectJoinOutcome::Joined);
+        runtime.block_on(reconnect_join_done(&mut state, &ui, id, pending, outcome));
+        assert_eq!(state.home.reconnect_tasks.len(), left);
+        assert_eq!(state.home.reconnecting.contains("libera"), left > 0);
+    }
+    assert_eq!(join_request_paths(&seen).len(), 2);
+}
+
+#[test]
 fn a_reconnect_answer_after_an_account_change_sends_nothing() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server_with(|_| (202, "{}"));

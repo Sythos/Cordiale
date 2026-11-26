@@ -246,6 +246,8 @@ enum WorkerCommand {
     ReconnectJoinCancel,
     /// An accepted reconnect and JOIN ended.
     ReconnectJoinDone {
+        /// The key of the operation in `reconnect_tasks`.
+        id: u64,
         pending: PendingReconnectJoin,
         outcome: ReconnectJoinOutcome,
     },
@@ -3034,8 +3036,8 @@ async fn run_worker(
                         state.home.reconnect_join = None;
                         push_home(&state, &ui);
                     }
-                    Some(WorkerCommand::ReconnectJoinDone { pending, outcome }) => {
-                        reconnect_join_done(&mut state, &ui, pending, outcome).await;
+                    Some(WorkerCommand::ReconnectJoinDone { id, pending, outcome }) => {
+                        reconnect_join_done(&mut state, &ui, id, pending, outcome).await;
                     }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
@@ -10120,6 +10122,9 @@ fn reconnect_join_accept(
         state.home.reconnecting.insert(network.clone());
     }
     let worker = worker_self.clone();
+    // An earlier operation of the same network keeps running.
+    let id = state.home.next_reconnect_task;
+    state.home.next_reconnect_task += 1;
     let task = tokio::spawn(async move {
         let join = JoinRequest {
             network_slug: &pending.network,
@@ -10133,12 +10138,14 @@ fn reconnect_join_accept(
             persistence::log_line(&format!("reconnect and join failed: {err:?}"));
         }
         let outcome = reconnect_join::outcome(&result);
-        let _ = worker.send(WorkerCommand::ReconnectJoinDone { pending, outcome });
+        let _ = worker.send(WorkerCommand::ReconnectJoinDone {
+            id,
+            pending,
+            outcome,
+        });
     });
-    state
-        .home
-        .reconnect_tasks
-        .insert(network, reconnect_join::AbortOnDrop(task.abort_handle()));
+    let abort = reconnect_join::AbortOnDrop(task.abort_handle());
+    state.home.reconnect_tasks.insert(id, (network, abort));
     push_home(state, ui);
 }
 
@@ -10147,6 +10154,7 @@ fn reconnect_join_accept(
 async fn reconnect_join_done(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
+    id: u64,
     pending: PendingReconnectJoin,
     outcome: ReconnectJoinOutcome,
 ) {
@@ -10159,8 +10167,10 @@ async fn reconnect_join_done(
         origin,
         ..
     } = pending;
-    state.home.reconnect_tasks.remove(&network);
-    state.home.reconnecting.remove(&network);
+    state.home.reconnect_tasks.remove(&id);
+    if !state.home.reconnect_task_runs(&network) {
+        state.home.reconnecting.remove(&network);
+    }
     match outcome {
         ReconnectJoinOutcome::Joined => {
             push_home(state, ui);
