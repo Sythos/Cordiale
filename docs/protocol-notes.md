@@ -15,15 +15,16 @@ Fonti:
 Valori dei server Grappa (2026-11-24, letti da fonti pubbliche, non da un server
 live): la release `v1.6.7` espone `protocol_version` 66 e `min_protocol_version` 1;
 `main` espone 67 e 1. Il passaggio 66→67 non cambia il JSON sul filo, quindi
-nessun nuovo gate. Cordiale dichiara 67 con minimo supportato 1. Il gate di
+nessun nuovo gate. Cordiale now declares 68, with minimum 1: see the section
+"Protocol 68" at the end. Il gate di
 `meta.member_modes` resta dal protocollo 66. I valori nell'esempio di
 `/api/config` della guida Grappa sono esempi: vanno letti dal sorgente o
 dall'endpoint. Il controllo live (`e2e_live_server.rs`) verifica il minimo del
 server contro la dichiarazione del client e non richiede server >= client.
 Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
 live non è dimostrata. I test senza rete (`e2e_live_server.rs` e
-`fetch_config_accepts_servers_at_protocol_66_and_67` in `client.rs`, con server
-simulato) coprono solo la logica e il parser per 66 e 67.
+`fetch_config_accepts_servers_at_protocol_66_to_68` in `client.rs`, con server
+simulato) coprono solo la logica e il parser da 66 a 68.
 Esito delle prove live (da compilare a ogni prova riuscita; il test stampa la
 riga `live check result: accepted, ...` con `--nocapture`; con
 `CORDIALE_LIVE_EXPECTED_PROTOCOL=66` o `67` il test fallisce se il server
@@ -1318,13 +1319,14 @@ The event inventory has 66 kinds (with `e2e_incoming` and
 ## E2E protocollo 59: messaggio in arrivo (§4l)
 
 Il server invia `e2e_incoming` e `e2e_incoming_lost` solo a un client che
-dichiara `client_proto=59` o più; Cordiale dichiara 67 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
+dichiara `client_proto=59` o più; Cordiale dichiara 68 (`CLIENT_PROTOCOL_VERSION`). I protocolli 56-58
 aggiungono campi e la rotta di upload cifrato, che Cordiale usa dalla v58 (sezione «E2E files: v58»).
-Dichiarare 67 è corretto perché Cordiale legge il campo `channel` (v63), usa la porta di invio dei canali
-(v62) e gestisce `422 no_query_window` (v65, sezione «Cursore di lettura di una query chiusa»). Il
+La dichiarazione è corretta perché Cordiale legge il campo `channel` (v63), usa la porta di invio dei canali
+(v62), gestisce `422 no_query_window` (v65, sezione «Cursore di lettura di una query chiusa») e
+`not_registered` (v68, section "Protocol 68"). Il
 protocollo 64 (`keep_nick`, evento `keep_nick_changed`) è ignorato: un evento sconosciuto non cambia stato. Il protocollo 60 non porta nulla che Cordiale legga. La rotta dei conteggi dei comandi (v61) e i
 campi di indirizzo di `whois_bundle` (v62) non sono usati: sono campi o rotte facoltativi, ignorati.
-Il test `client_declares_protocol_67_with_the_channel_rows` (`protocol.rs`) fissa questi valori.
+Il test `client_declares_protocol_68_with_the_channel_rows` (`protocol.rs`) fissa questi valori.
 
 - `e2e_incoming` (`network`, `from`, `from_did`, `to`, `msgid`) arriva una volta
   per un PKMSG o MSG su più righe, mai per uno su una riga. `to` è un id
@@ -2181,10 +2183,13 @@ formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/
 - **Flusso:** ogni tentativo inizia con una lettura di `/me`. Rete connessa e canale già entrato: si seleziona
   il canale, nessuna domanda e nessun JOIN. Rete connessa, canale non entrato: domanda, JOIN solo dopo il sì.
   Rete disponibile ma non collegata: una sola richiesta di attach, poi nuova lettura di `/me`; se la rete
-  compare, stessa domanda. Rete parcheggiata: messaggio che rimanda al Reconnect della Home, nessuna
-  riconnessione silenziosa.
-- **Errori dell'attach:** `409` (`already_attached`) è una corsa: si rilegge `/me`. Altri rifiuti 4xx, e una
-  rete non presente nelle due liste, mostrano lo stesso messaggio. Se la lettura fallisce o la rete non compare
+  compare, stessa domanda. Parked or failed network: one reconnect question (section "Protocol 68"), no
+  silent reconnect.
+- **Errori dell'attach:** `409` (`already_attached`) è una corsa: si rilegge `/me`. A known `error` code shows
+  its reason: `too_many_sessions` and `ip_cap_exceeded` (session limit), `rate_limited`. Cordiale already reads
+  the first two codes at sign-in. The checked protocol document does not list the attach codes. An unknown 4xx
+  code, and a network that is in neither list, show the "not available" message. Any other unknown failure shows
+  the generic attach message. Cordiale never shows the code text. Se la lettura fallisce o la rete non compare
   si mostra un errore; il tentativo successivo rilegge prima di inviare un altro attach.
 - **Sessione:** l'invito ricorda token e server. Dopo logout, cambio account o cambio server nessun passo
   prosegue. Annullare la domanda lascia la rete collegata.
@@ -2195,3 +2200,25 @@ formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/
   vera si legge dal sorgente e da `/api/config`.
 - **Non verificato:** le prove contro i server di prova 66 e 67 (`e2e_live_server.rs`) non sono state eseguite
   qui, perché non c'era un server raggiungibile. Il flusso è coperto da test puri in `invite_link.rs`.
+
+## Protocol 68 (issue 965)
+
+Protocol 68 adds one refusal. Before the network sends the IRC reply `001`, Grappa refuses an action that
+writes an IRC line. The error is `not_registered`. Grappa sends nothing.
+
+- **Checked source:** `docs/CLIENT_PROTOCOL.md` on Grappa `main` (2026-11-26). It gives `503 not_registered`
+  for the E2E send route. Issue 965 states that REST routes and Phoenix replies use the same error. The Grappa
+  server source was not read.
+- **REST:** `GrappaClientError::is_not_registered` needs status `503` and the code `not_registered`. Send, JOIN,
+  PART, topic, nick, directory refresh and the E2E routes keep this code.
+- **Phoenix:** an error reply on the user topic with `error` or `reason` set to `not_registered` gets the same
+  message. A kickban sends no ban and no kick after this refusal.
+- **Interface:** the message says that Grappa is still connecting. The action stays failed. The user can try
+  again. A queued encrypted text that gets this refusal is a failed send.
+- **Reconnect and JOIN:** invite links, `/join` and featured channels on a `parked`, `failed` or `failing`
+  network ask one question. Cancel sends no request. Accept sends `PATCH /networks/:slug` with
+  `connection_state: "connected"`, then the JOIN. Cordiale repeats the JOIN only after `not_registered`, at most
+  16 times, 2 seconds apart. A logout or a new sign-in stops the repeats.
+- **Why Cordiale declares 68:** it handles the new refusal, and tests cover it. The minimum stays 1, because
+  Cordiale needs no new field from the server.
+- **Not verified:** no live Grappa 68 server was available. The tests use a simulated server.
