@@ -197,7 +197,8 @@ pub(crate) fn parse_invite(link: &str, server_base_url: &str) -> Result<InviteTa
 /// What the trusted `GET /me` says about the network of an invite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NetworkAccess {
-    /// Attached to the session. `parked` is true when it is not connected.
+    /// Attached to the session. `parked` is true when it is parked or
+    /// failed.
     Attached { parked: bool },
     /// The user can attach it with one request.
     Available,
@@ -232,7 +233,7 @@ pub(crate) enum InviteStep {
     AskJoin,
     /// Send one attach request.
     Attach,
-    /// The network is not connected: ask once, then reconnect and join.
+    /// The network is parked or failed: ask once, then reconnect and join.
     AskReconnect,
     /// Same error for an unknown network and one the user cannot attach.
     Unavailable,
@@ -260,8 +261,9 @@ pub(crate) enum AttachNext {
 
 /// A refusal is its HTTP status (`None` for a failure without one) and the
 /// `error` code of its body. `409 already_attached` is a race, not an
-/// error. A known code shows its reason. The code itself is never shown: an
-/// unknown one gets the message of its status.
+/// error. A code that Grappa sends for an attach shows its reason. The code
+/// itself is never shown: any other one gets the message of its status.
+/// `network_not_visitor_enabled` and `not_found` mean "not available".
 pub(crate) fn attach_next(result: Result<(), (Option<u16>, Option<&str>)>) -> AttachNext {
     let Err((status, code)) = result else {
         return AttachNext::Reread;
@@ -270,7 +272,16 @@ pub(crate) fn attach_next(result: Result<(), (Option<u16>, Option<&str>)>) -> At
         return AttachNext::Reread;
     }
     AttachNext::Refused(match (code, status) {
-        (Some("too_many_sessions" | "ip_cap_exceeded"), _) => "invite-attach-sessions",
+        // The limit of this source address.
+        (Some("too_many_sessions"), _) => "invite-attach-sessions",
+        // The limit of the network, for all accounts.
+        (Some("network_busy"), _) => "invite-attach-full",
+        (Some("network_unreachable" | "upstream_unreachable"), _) => "invite-attach-unreachable",
+        (Some("network_unconfigured" | "session_plan_resolve_failed"), _) => {
+            "invite-attach-unconfigured"
+        }
+        (Some("validation_failed"), _) => "invite-attach-settings",
+        (Some("db_unavailable"), _) => "invite-attach-server-busy",
         (Some("rate_limited"), _) => "invite-attach-rate-limited",
         (_, Some(400..=499)) => "invite-unavailable",
         _ => "invite-attach-failed",
@@ -445,7 +456,13 @@ mod tests {
     #[test]
     fn reads_the_access_from_me() {
         let me = me_with(
-            &[("libera", "connected"), ("oftc", "parked"), ("old", "")],
+            &[
+                ("libera", "connected"),
+                ("oftc", "parked"),
+                ("efnet", "failed"),
+                ("ircnet", "failing"),
+                ("old", ""),
+            ],
             &["rizon"],
         );
         assert_eq!(
@@ -457,9 +474,17 @@ mod tests {
             NetworkAccess::Attached { parked: true }
         );
         assert_eq!(
-            network_access(&me, "old"),
-            NetworkAccess::Attached { parked: false }
+            network_access(&me, "efnet"),
+            NetworkAccess::Attached { parked: true }
         );
+        // A failing network keeps its session.
+        for live in ["ircnet", "old"] {
+            assert_eq!(
+                network_access(&me, live),
+                NetworkAccess::Attached { parked: false },
+                "{live}"
+            );
+        }
         assert_eq!(network_access(&me, "rizon"), NetworkAccess::Available);
         assert_eq!(network_access(&me, "nope"), NetworkAccess::Unknown);
         let mut empty = me_with(&[], &[]);
@@ -494,7 +519,7 @@ mod tests {
         );
         // Denied, unknown or invalid, with no known reason: one message.
         for status in [400, 401, 403, 404, 422] {
-            for code in [None, Some("new_reason")] {
+            for code in [None, Some("new_reason"), Some("not_found")] {
                 assert_eq!(
                     attach_next(Err((Some(status), code))),
                     AttachNext::Refused("invite-unavailable")
@@ -517,8 +542,19 @@ mod tests {
     fn a_known_attach_reason_has_its_own_message() {
         for (status, code, key) in [
             (503, "too_many_sessions", "invite-attach-sessions"),
-            (429, "ip_cap_exceeded", "invite-attach-sessions"),
+            (503, "network_busy", "invite-attach-full"),
+            (503, "network_unreachable", "invite-attach-unreachable"),
+            (502, "upstream_unreachable", "invite-attach-unreachable"),
+            (503, "network_unconfigured", "invite-attach-unconfigured"),
+            (
+                500,
+                "session_plan_resolve_failed",
+                "invite-attach-unconfigured",
+            ),
+            (422, "validation_failed", "invite-attach-settings"),
+            (503, "db_unavailable", "invite-attach-server-busy"),
             (429, "rate_limited", "invite-attach-rate-limited"),
+            (403, "network_not_visitor_enabled", "invite-unavailable"),
         ] {
             assert_eq!(
                 attach_next(Err((Some(status), Some(code)))),

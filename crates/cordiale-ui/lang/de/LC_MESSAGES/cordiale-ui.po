@@ -4388,6 +4388,22 @@ msgid "The server refused the network: the session limit is reached. Close anoth
 msgstr "Der Server hat das Netzwerk abgelehnt: Das Sitzungslimit ist erreicht. Schließe eine andere Sitzung oder versuche es später erneut."
 
 msgctxt "AppWindow"
+msgid "The server refused the network: the network is full. Try again later."
+msgstr "Der Server hat das Netzwerk abgelehnt: Das Netzwerk ist voll. Versuche es später erneut."
+
+msgctxt "AppWindow"
+msgid "The server cannot reach the network now. Try again later."
+msgstr "Der Server kann das Netzwerk derzeit nicht erreichen. Versuche es später erneut."
+
+msgctxt "AppWindow"
+msgid "The network is not fully set up on the server. Tell the server operator."
+msgstr "Das Netzwerk ist auf dem Server nicht vollständig eingerichtet. Informiere den Serverbetreiber."
+
+msgctxt "AppWindow"
+msgid "The server refused the settings of your account for this network."
+msgstr "Der Server hat die Einstellungen deines Kontos für dieses Netzwerk abgelehnt."
+
+msgctxt "AppWindow"
 msgid "The server refused the network: too many requests. Try again later."
 msgstr "Der Server hat das Netzwerk abgelehnt: zu viele Anfragen. Versuche es später erneut."
 
