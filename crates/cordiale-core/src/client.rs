@@ -133,6 +133,35 @@ fn same_origin_redirects() -> reqwest::redirect::Policy {
     })
 }
 
+/// The error token of an IRC write refused before registration, in a REST
+/// body and in a Phoenix error reply.
+pub const NOT_REGISTERED: &str = "not_registered";
+
+/// One `JOIN`: a channel or a comma-separated list, with an optional key.
+#[derive(Clone, Copy)]
+pub struct JoinRequest<'a> {
+    pub network_slug: &'a str,
+    pub channels: &'a str,
+    pub key: Option<&'a str>,
+}
+
+/// How often a `JOIN` that follows a reconnect is sent while the network
+/// has not registered the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinRetry {
+    /// The most `JOIN` requests, the first one included.
+    pub attempts: u32,
+    pub delay: Duration,
+}
+
+/// The step of a reconnect followed by a `JOIN` that failed.
+#[derive(Debug)]
+pub enum ReconnectJoinError {
+    /// The reconnect was refused: no `JOIN` went out.
+    Reconnect(GrappaClientError),
+    Join(GrappaClientError),
+}
+
 #[derive(Debug)]
 pub enum GrappaClientError {
     Http(reqwest::Error),
@@ -172,6 +201,14 @@ impl GrappaClientError {
             GrappaClientError::Rejected { code, .. } => code.as_deref(),
             _ => None,
         }
+    }
+
+    /// Whether Grappa refused an IRC write because the network has not
+    /// registered the session yet (`503 not_registered`, protocol 68, no
+    /// `001`). Nothing was sent: try again once the network is connected.
+    pub fn is_not_registered(&self) -> bool {
+        self.status() == Some(StatusCode::SERVICE_UNAVAILABLE)
+            && self.code() == Some(NOT_REGISTERED)
     }
 
     /// The wait the server asked for with a refusal (`Rejected`), when it
@@ -3474,12 +3511,8 @@ impl GrappaClient {
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["networks", network_slug, "directory", "refresh"]);
-        self.http
-            .post(url)
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.http.post(url).bearer_auth(token).send().await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -4070,6 +4103,38 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// Connects a network when `reconnect` is set, then joins. The server
+    /// refuses the `JOIN` with `not_registered` until the network answers
+    /// with `001`, so only that refusal is tried again, within `retry`.
+    /// Any other failure ends at once.
+    pub async fn reconnect_and_join(
+        &self,
+        token: &str,
+        join: JoinRequest<'_>,
+        reconnect: bool,
+        retry: JoinRetry,
+    ) -> Result<(), ReconnectJoinError> {
+        if reconnect {
+            self.set_connection_state(token, join.network_slug, "connected", None)
+                .await
+                .map_err(ReconnectJoinError::Reconnect)?;
+        }
+        let mut sent = 1;
+        loop {
+            match self
+                .join_channel(token, join.network_slug, join.channels, join.key)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if err.is_not_registered() && sent < retry.attempts => {
+                    tokio::time::sleep(retry.delay).await;
+                    sent += 1;
+                }
+                Err(err) => return Err(ReconnectJoinError::Join(err)),
+            }
+        }
+    }
+
     /// `POST /networks/:slug/channels/:channel/topic` — sets the topic.
     pub async fn set_topic(
         &self,
@@ -4106,13 +4171,14 @@ impl GrappaClient {
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["networks", network_slug, "nick"]);
-        self.http
+        let response = self
+            .http
             .post(url)
             .bearer_auth(token)
             .json(&serde_json::json!({ "nick": nick }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -4147,20 +4213,22 @@ impl GrappaClient {
     /// `POST /session/networks` — attaches a network to the caller's own
     /// session (a one-tap connect from the home page, or the re-attach of a
     /// detached binding with everything it was detached with). The outcome
-    /// reaches every client as `network_attached`.
+    /// reaches every client as `network_attached`. A refusal keeps its
+    /// `error` code.
     pub async fn attach_network(
         &self,
         token: &str,
         network_slug: &str,
     ) -> Result<(), GrappaClientError> {
         let url = format!("{}/session/networks", self.base_url);
-        self.http
+        let response = self
+            .http
             .post(url)
             .bearer_auth(token)
             .json(&serde_json::json!({ "network": network_slug }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -4343,11 +4411,11 @@ mod tests {
     }
 
     /// Offline check only: a mock server is not a live Grappa server. It runs
-    /// the real config parser on the two current targets (66 and 67, both with
+    /// the real config parser on the current targets (66 to 68, all with
     /// minimum 1) and checks that the client declaration reaches the minimum.
     #[tokio::test]
-    async fn fetch_config_accepts_servers_at_protocol_66_and_67() {
-        for server_protocol in [66, 67] {
+    async fn fetch_config_accepts_servers_at_protocol_66_to_68() {
+        for server_protocol in [66, 67, 68] {
             let mock_server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/api/config"))
@@ -7036,6 +7104,160 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    fn not_registered() -> ResponseTemplate {
+        ResponseTemplate::new(503).set_body_json(serde_json::json!({"error": "not_registered"}))
+    }
+
+    const QUICK_RETRY: JoinRetry = JoinRetry {
+        attempts: 3,
+        delay: Duration::from_millis(1),
+    };
+
+    const JOIN: JoinRequest<'static> = JoinRequest {
+        network_slug: "libera",
+        channels: "#grappa",
+        key: None,
+    };
+
+    #[tokio::test]
+    async fn irc_writes_report_not_registered() {
+        let mock_server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(not_registered())
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let send = client
+            .send_message("t", "libera", "#grappa", &SendMessageRequest::plain("hi"))
+            .await
+            .map(|_| ());
+        for result in [
+            send,
+            client.join_channel("t", "libera", "#grappa", None).await,
+            client.part_channel("t", "libera", "#grappa", None).await,
+            client.set_topic("t", "libera", "#grappa", "text").await,
+            client.change_nick("t", "libera", "nick").await,
+            client.refresh_directory("t", "libera").await,
+        ] {
+            assert!(result.expect_err("503").is_not_registered());
+        }
+    }
+
+    #[tokio::test]
+    async fn another_503_is_not_a_registration_refusal() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(serde_json::json!({"error": "db_unavailable"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .join_channel("t", "libera", "#grappa", None)
+            .await
+            .expect_err("503");
+        assert!(!error.is_not_registered());
+    }
+
+    #[tokio::test]
+    async fn reconnect_and_join_connects_then_retries_until_registered() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/networks/libera"))
+            .and(body_json(
+                serde_json::json!({"connection_state": "connected"}),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels"))
+            .respond_with(not_registered())
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .await
+            .expect("joined");
+        let requests = mock_server.received_requests().await.expect("requests");
+        assert_eq!(requests[0].method.as_str(), "PATCH");
+    }
+
+    #[tokio::test]
+    async fn reconnect_and_join_stops_after_the_last_attempt() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(not_registered())
+            .expect(3)
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .await
+            .expect_err("never registered");
+        assert!(matches!(
+            error,
+            ReconnectJoinError::Join(err) if err.is_not_registered()
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_reconnect_sends_no_join() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .reconnect_and_join("t", JOIN, true, QUICK_RETRY)
+            .await
+            .expect_err("reconnect refused");
+        assert!(matches!(error, ReconnectJoinError::Reconnect(_)));
+    }
+
+    #[tokio::test]
+    async fn an_attach_refusal_keeps_its_reason() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/session/networks"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(serde_json::json!({"error": "too_many_sessions"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .attach_network("tok", "libera")
+            .await
+            .expect_err("refused");
+        assert_eq!(error.code(), Some("too_many_sessions"));
     }
 
     #[tokio::test]

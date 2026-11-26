@@ -48,6 +48,9 @@ pub enum E2eRefusal {
     UpstreamUnreachable,
     SessionTimeout,
     DbUnavailable,
+    /// The network has not registered the session yet (protocol 68). Nothing
+    /// was sent. Try again once it is connected.
+    NotRegistered,
     ListedDevice,
     TooManyDevices,
     MasterMismatch,
@@ -80,7 +83,7 @@ pub enum E2eRefusal {
 }
 
 /// Every known refusal with its token and status.
-static KNOWN: [(E2eRefusal, &str, u16); 26] = [
+static KNOWN: [(E2eRefusal, &str, u16); 27] = [
     (E2eRefusal::BadRequest, "bad_request", 400),
     (E2eRefusal::InvalidLine, "invalid_line", 400),
     (E2eRefusal::UnknownDevice, "unknown_device", 422),
@@ -91,6 +94,7 @@ static KNOWN: [(E2eRefusal, &str, u16); 26] = [
     (E2eRefusal::UpstreamUnreachable, "upstream_unreachable", 502),
     (E2eRefusal::SessionTimeout, "session_timeout", 504),
     (E2eRefusal::DbUnavailable, "db_unavailable", 503),
+    (E2eRefusal::NotRegistered, "not_registered", 503),
     (E2eRefusal::ListedDevice, "listed_device", 409),
     (E2eRefusal::TooManyDevices, "too_many_devices", 409),
     (E2eRefusal::MasterMismatch, "master_mismatch", 409),
@@ -329,6 +333,14 @@ mod tests {
             E2eRouteError::from(other),
             E2eRouteError::Client(_)
         ));
+    }
+
+    #[test]
+    fn not_registered_is_known_only_with_its_status() {
+        let read = E2eRefusal::from_response(503, Some("not_registered"));
+        assert_eq!(read, E2eRefusal::NotRegistered);
+        let other = E2eRefusal::from_response(500, Some("not_registered"));
+        assert_eq!(other, unknown(500, Some("not_registered")));
     }
 
     #[test]

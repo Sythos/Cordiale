@@ -503,6 +503,9 @@ pub enum SendResponse {
     /// a delivery.
     Accepted,
     Failed(SendFailure),
+    /// `503 not_registered`: the network has not registered the session yet.
+    /// Nothing was sent.
+    NotRegistered,
     /// Any other status: not part of the send contract.
     Unexpected(u16),
 }
@@ -528,6 +531,7 @@ pub fn classify_send_response(status: u16, error: Option<&str>) -> SendResponse 
         (202, _) => SendResponse::Accepted,
         (422, Some("too_late")) => SendResponse::Failed(SendFailure::TooLate),
         (400, Some("bad_request")) => SendResponse::Failed(SendFailure::BadRequest),
+        (503, Some("not_registered")) => SendResponse::NotRegistered,
         _ => SendResponse::Unexpected(status),
     }
 }
@@ -621,7 +625,7 @@ impl SendTracker {
         let next = match response {
             SendResponse::Accepted => SendStatus::Accepted,
             SendResponse::Failed(failure) => SendStatus::Failed(failure),
-            SendResponse::Unexpected(_) => return false,
+            SendResponse::NotRegistered | SendResponse::Unexpected(_) => return false,
         };
         match self.sends.get_mut(id) {
             Some(status @ SendStatus::Pending) => {
@@ -738,7 +742,7 @@ impl SendBook {
         let next = match response {
             SendResponse::Accepted => SendStatus::Accepted,
             SendResponse::Failed(failure) => SendStatus::Failed(failure),
-            SendResponse::Unexpected(_) => return false,
+            SendResponse::NotRegistered | SendResponse::Unexpected(_) => return false,
         };
         match self.sends.get_mut(key) {
             Some(status @ SendStatus::Pending) => {
@@ -1191,6 +1195,14 @@ mod tests {
         assert_eq!(
             classify_send_response(500, None),
             SendResponse::Unexpected(500)
+        );
+        assert_eq!(
+            classify_send_response(503, Some("not_registered")),
+            SendResponse::NotRegistered
+        );
+        assert_eq!(
+            classify_send_response(503, Some("db_unavailable")),
+            SendResponse::Unexpected(503)
         );
     }
 
