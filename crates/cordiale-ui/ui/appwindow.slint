@@ -3110,6 +3110,16 @@ export component AppWindow inherits Window {
             return @tr("This network is not available to you.");
         } else if key == "invite-attach-sessions" {
             return @tr("The server refused the network: the session limit is reached. Close another session or try again later.");
+        } else if key == "invite-attach-full" {
+            return @tr("The server refused the network: the network is full. Try again later.");
+        } else if key == "invite-attach-unreachable" {
+            return @tr("The server cannot reach the network now. Try again later.");
+        } else if key == "invite-attach-unconfigured" {
+            return @tr("The network is not fully set up on the server. Tell the server operator.");
+        } else if key == "invite-attach-settings" {
+            return @tr("The server refused the settings of your account for this network.");
+        } else if key == "invite-attach-server-busy" {
+            return @tr("Grappa is busy right now. Try again in a moment.");
         } else if key == "invite-attach-rate-limited" {
             return @tr("The server refused the network: too many requests. Try again later.");
         } else if key == "network-connecting" {

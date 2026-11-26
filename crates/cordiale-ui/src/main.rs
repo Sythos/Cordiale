@@ -10093,8 +10093,8 @@ fn ask_reconnect_join(
     push_home(state, ui);
 }
 
-/// The user accepted: reconnects and joins in a task, so the wait for the
-/// registration never blocks the worker.
+/// The user accepted: reconnects and joins in a task, so a slow reconnect
+/// never blocks the worker.
 fn reconnect_join_accept(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -10132,7 +10132,7 @@ fn reconnect_join_accept(
             key: pending.key.as_deref(),
         };
         let result = client
-            .reconnect_and_join(&pending.token, join, reconnect, reconnect_join::JOIN_RETRY)
+            .reconnect_and_join(&pending.token, join, reconnect)
             .await;
         if let Err(err) = &result {
             persistence::log_line(&format!("reconnect and join failed: {err:?}"));
@@ -10149,8 +10149,8 @@ fn reconnect_join_accept(
     push_home(state, ui);
 }
 
-/// Shows how an accepted reconnect and JOIN ended. An invite and a featured
-/// channel open the joined window.
+/// Shows how an accepted reconnect and JOIN ended. Each origin but `/join`
+/// opens the joined window.
 async fn reconnect_join_done(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -10197,7 +10197,7 @@ async fn reconnect_join_done(
                 JoinOrigin::Featured => {
                     state.home.featured_errors.insert(network, channels.clone());
                 }
-                JoinOrigin::Command => {}
+                JoinOrigin::Command | JoinOrigin::Link => {}
             }
             if outcome == ReconnectJoinOutcome::InvalidChannel {
                 set_command_status(ui, "invalid-channel", channels);
@@ -10454,6 +10454,17 @@ async fn invite_join_accept(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     }
     let target = pending.target;
     state.home.invite_error = None;
+    // Parked since the JOIN question: the reconnect needs its own yes.
+    if network_needs_reconnect(state, &target.network) {
+        return ask_reconnect_join(
+            state,
+            ui,
+            target.network,
+            target.channel,
+            None,
+            JoinOrigin::Invite,
+        );
+    }
     if let Err(err) = client
         .join_channel(&token, &target.network, &target.channel, None)
         .await
@@ -13869,6 +13880,7 @@ fn close_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
 
 /// A directory row: joined first when it isn't, then focused, like
 /// Cicchetto (the intent follows the tap). A failed join stays on the pane.
+/// A parked or failed network asks first.
 async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, channel: String) {
     let Some(network) = state
         .panels
@@ -13889,6 +13901,9 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         .get(&window_state_key(&network, &channel))
         == Some(&ChannelWindowState::Joined);
     if !joined {
+        if network_needs_reconnect(state, &network) {
+            return ask_reconnect_join(state, ui, network, channel, None, JoinOrigin::Link);
+        }
         let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
         else {
             return;
@@ -13947,7 +13962,7 @@ fn channel_link_plan(window: Option<&ChannelWindowState>) -> ChannelLinkPlan {
 /// can open: it is joined, or the server accepted the join request. A
 /// pending join and a failed request return false, so no second request
 /// goes out and the current window stays open. A failure shows its error
-/// in the status bar.
+/// in the status bar. A parked or failed network asks first.
 async fn channel_link_join(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -13962,6 +13977,17 @@ async fn channel_link_join(
         ChannelLinkPlan::Wait => false,
         ChannelLinkPlan::Open => true,
         ChannelLinkPlan::Join => {
+            if network_needs_reconnect(state, network) {
+                ask_reconnect_join(
+                    state,
+                    ui,
+                    network.to_string(),
+                    channel.to_string(),
+                    None,
+                    JoinOrigin::Link,
+                );
+                return false;
+            }
             let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
             else {
                 return false;

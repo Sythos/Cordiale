@@ -5698,6 +5698,72 @@ fn a_reconnect_answer_after_an_account_change_sends_nothing() {
 }
 
 #[test]
+fn a_channel_link_and_a_directory_row_on_a_parked_network_ask_first() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = parked_network_state(&url);
+    let runtime = network_test_runtime();
+
+    let opens = runtime.block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale"));
+    assert!(!opens);
+    let pending = state.home.reconnect_join.take().expect("question");
+    assert_eq!(pending.origin, JoinOrigin::Link);
+
+    state.panels.directory = Some(DirectoryView::new("libera".to_string(), String::new()));
+    runtime.block_on(directory_activate(&mut state, &ui, "#cordiale".to_string()));
+    let pending = state.home.reconnect_join.take().expect("question");
+    assert_eq!(pending.origin, JoinOrigin::Link);
+
+    assert!(seen.lock().expect("log").is_empty());
+}
+
+#[test]
+fn an_invite_join_on_a_network_parked_meanwhile_asks_to_reconnect() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = parked_network_state(&url);
+    state.home.invite_pending = Some(invite_link::PendingInvite {
+        target: invite_link::InviteTarget {
+            network: "libera".to_string(),
+            channel: "#cordiale".to_string(),
+        },
+        token: "test-token".to_string(),
+        base_url: state
+            .conn
+            .client
+            .as_ref()
+            .expect("client")
+            .base_url()
+            .to_string(),
+    });
+
+    network_test_runtime().block_on(invite_join_accept(&mut state, &ui));
+    let pending = state.home.reconnect_join.take().expect("question");
+    assert_eq!(pending.origin, JoinOrigin::Invite);
+    assert!(state.home.invite_pending.is_none());
+    assert!(seen.lock().expect("log").is_empty());
+}
+
+#[test]
+fn a_join_on_a_failing_network_goes_out_without_a_question() {
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = parked_network_state(&url);
+    state.networks.network_connection_states.insert(
+        "libera".to_string(),
+        NetworkConnectionSnapshot {
+            status: NetworkConnectionStatus::Failing,
+            reason: None,
+            changed_at: None,
+        },
+    );
+    let runtime = network_test_runtime();
+
+    join_command(&mut state, &runtime);
+    assert!(state.home.reconnect_join.is_none());
+    assert_eq!(join_request_paths(&seen).len(), 1);
+}
+
+#[test]
 fn fan_out_reaches_only_joined_channels_of_the_network() {
     let mut state = WorkerState::new();
     state.windows.channel_entries = vec![

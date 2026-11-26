@@ -2185,12 +2185,9 @@ formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/
   Rete disponibile ma non collegata: una sola richiesta di attach, poi nuova lettura di `/me`; se la rete
   compare, stessa domanda. Parked or failed network: one reconnect question (section "Protocol 68"), no
   silent reconnect.
-- **Errori dell'attach:** `409` (`already_attached`) è una corsa: si rilegge `/me`. A known `error` code shows
-  its reason: `too_many_sessions` and `ip_cap_exceeded` (session limit), `rate_limited`. Cordiale already reads
-  the first two codes at sign-in. The checked protocol document does not list the attach codes. An unknown 4xx
-  code, and a network that is in neither list, show the "not available" message. Any other unknown failure shows
-  the generic attach message. Cordiale never shows the code text. Se la lettura fallisce o la rete non compare
-  si mostra un errore; il tentativo successivo rilegge prima di inviare un altro attach.
+- **Errori dell'attach:** `409` (`already_attached`) è una corsa: si rilegge `/me`. Each other refusal shows
+  its reason (table in section "Protocol 68"). Cordiale never shows the code text. Se la lettura fallisce o la
+  rete non compare si mostra un errore; il tentativo successivo rilegge prima di inviare un altro attach.
 - **Sessione:** l'invito ricorda token e server. Dopo logout, cambio account o cambio server nessun passo
   prosegue. Annullare la domanda lascia la rete collegata.
 - **Versioni controllate (2026-11-25):** Cordiale `main` dichiara il protocollo 67 e il minimo 1
@@ -2206,19 +2203,44 @@ formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/
 Protocol 68 adds one refusal. Before the network sends the IRC reply `001`, Grappa refuses an action that
 writes an IRC line. The error is `not_registered`. Grappa sends nothing.
 
-- **Checked source:** `docs/CLIENT_PROTOCOL.md` on Grappa `main` (2026-11-26). It gives `503 not_registered`
-  for the E2E send route. Issue 965 states that REST routes and Phoenix replies use the same error. The Grappa
-  server source was not read.
-- **REST:** `GrappaClientError::is_not_registered` needs status `503` and the code `not_registered`. Send, JOIN,
-  PART, topic, nick, directory refresh and the E2E routes keep this code.
-- **Phoenix:** an error reply on the user topic with `error` or `reason` set to `not_registered` gets the same
-  message. A kickban sends no ban and no kick after this refusal.
+- **Checked source (2026-11-26, Grappa tag `v1.7.0`):** `session/server.ex`, `session/verb_policy.ex`,
+  `channels/grappa_channel.ex`, `controllers/fallback_controller.ex`, `controllers/session_controller.ex`,
+  `plugs/request_budget.ex`, `admission.ex`, `spawn_orchestrator.ex`, `networks.ex`, `visitors.ex`. Cicchetto:
+  `channelJoin.ts`, `inviteLink.ts`, `networkSession.ts`, `friendlyApiError.ts`, `api.ts`.
+- **Refused actions:** before `001`, Grappa refuses each action that needs a registered session. Examples are a
+  message, an E2E send, a topic, a mode, a kick, a nick change and a directory refresh.
+- **Not refused:** Grappa keeps a JOIN and writes it at `001` (policy `held`). It answers `202`. A PART runs its
+  local part (policy `local_first`). The away state waits for `001` (policy `desired_state`).
+- **REST:** the answer is `503 {"error": "not_registered"}`. `GrappaClientError::is_not_registered` needs this
+  status and this code.
+- **Phoenix:** the error reply is `{"error": "not_registered"}`. Cordiale reads `error` and `reason` on the user
+  topic. A kickban sends no ban and no kick after this refusal.
 - **Interface:** the message says that Grappa is still connecting. The action stays failed. The user can try
   again. A queued encrypted text that gets this refusal is a failed send.
-- **Reconnect and JOIN:** invite links, `/join` and featured channels on a `parked`, `failed` or `failing`
-  network ask one question. Cancel sends no request. Accept sends `PATCH /networks/:slug` with
-  `connection_state: "connected"`, then the JOIN. Cordiale repeats the JOIN only after `not_registered`, at most
-  16 times, 2 seconds apart. A logout or a new sign-in stops the repeats.
+- **Reconnect and JOIN:** only a `parked` or `failed` network has no session. A `failing` network keeps its
+  session, so its JOIN goes out directly. Accept sends `PATCH /networks/:slug` with
+  `connection_state: "connected"`, then one JOIN. No wait and no repeat are necessary. Cancel sends no request.
+  A logout or a new sign-in stops a JOIN that did not go out.
+- **Questions:** invite links, `/join`, featured channels, channel links and directory rows ask one question.
+  Cicchetto asks only for invite links and channel links. Its other actions reconnect without a question.
+  Cordiale asks each time, because issue 965 requires it for `/join` and the Home page. If the network parks
+  after the JOIN question of an invite, Cordiale asks the reconnect question.
+
+Refusals of `POST /session/networks` and the message of the invite:
+
+| Status and code | Cordiale message |
+| --- | --- |
+| `409 already_attached` | No message: Cordiale reads `/me` again |
+| `503 too_many_sessions` | The session limit of this address is reached |
+| `503 network_busy` | The network is full |
+| `503 network_unreachable`, `502 upstream_unreachable` | The server cannot reach the network |
+| `503 network_unconfigured`, `500 session_plan_resolve_failed` | The network is not fully set up |
+| `422 validation_failed` | The server refused the account settings |
+| `503 db_unavailable` | Grappa is busy |
+| `429 rate_limited` | Too many requests |
+| `403 network_not_visitor_enabled`, `404 not_found`, other `4xx` | The network is not available |
+| Any other failure | Generic message |
+
 - **Why Cordiale declares 68:** it handles the new refusal, and tests cover it. The minimum stays 1, because
   Cordiale needs no new field from the server.
 - **Not verified:** no live Grappa 68 server was available. The tests use a simulated server.

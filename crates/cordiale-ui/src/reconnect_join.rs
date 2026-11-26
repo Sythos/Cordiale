@@ -20,24 +20,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! A `JOIN` on a network that is not connected: invite links, `/join` and
-//! the featured channels of the home page ask one question, and only a yes
-//! reconnects and joins. This module holds the pure parts; `main.rs` owns
-//! the question and the task that sends the requests.
+//! A `JOIN` on a network that is parked or failed: invite links, `/join`,
+//! featured channels, channel links and directory rows ask one question,
+//! and only a yes reconnects and joins. This module holds the pure parts;
+//! `main.rs` owns the question and the task that sends the requests.
 
-use std::time::Duration;
-
-use cordiale_core::client::{JoinRetry, ReconnectJoinError};
-
-/// How long a `JOIN` waits for the network to register: about 30 seconds.
-pub(crate) const JOIN_RETRY: JoinRetry = JoinRetry {
-    attempts: 16,
-    delay: Duration::from_secs(2),
-};
+use cordiale_core::client::ReconnectJoinError;
 
 /// Whether a network in `connection_state` must reconnect before a `JOIN`.
+/// A `failing` network does not: its session retries on its own, and Grappa
+/// keeps the `JOIN` until the network registers the session.
 pub(crate) fn needs_reconnect(connection_state: &str) -> bool {
-    matches!(connection_state, "parked" | "failed" | "failing")
+    matches!(connection_state, "parked" | "failed")
 }
 
 /// Where the `JOIN` was asked, which decides where its result shows.
@@ -47,6 +41,8 @@ pub(crate) enum JoinOrigin {
     /// `/join`: the server events open the window, as without a reconnect.
     Command,
     Featured,
+    /// A channel link or a directory row: opens the joined window.
+    Link,
 }
 
 /// A `JOIN` that waits for the user to accept the reconnect. It remembers
@@ -79,7 +75,7 @@ pub(crate) enum ReconnectJoinOutcome {
     Joined,
     /// No `JOIN` went out.
     ReconnectFailed,
-    /// The network did not register in time. The user can try again.
+    /// The `JOIN` got `not_registered`. The user can try again.
     StillConnecting,
     InvalidChannel,
     JoinFailed,
@@ -99,8 +95,8 @@ pub(crate) fn outcome(result: &Result<(), ReconnectJoinError>) -> ReconnectJoinO
     }
 }
 
-/// Stops its task when dropped, so a logout or a new sign-in ends the
-/// retries of the old session.
+/// Stops its task when dropped, so a logout or a new sign-in sends no more
+/// requests for the old session.
 #[derive(Debug)]
 pub(crate) struct AbortOnDrop(pub(crate) tokio::task::AbortHandle);
 
@@ -124,11 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_network_that_is_not_connected_needs_a_reconnect() {
-        for state in ["parked", "failed", "failing"] {
+    fn only_a_parked_or_failed_network_needs_a_reconnect() {
+        for state in ["parked", "failed"] {
             assert!(needs_reconnect(state), "{state}");
         }
-        for state in ["connected", ""] {
+        for state in ["connected", "failing", ""] {
             assert!(!needs_reconnect(state), "{state}");
         }
     }
