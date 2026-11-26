@@ -75,9 +75,11 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// Protocol 65 makes a DM read cursor need its query window (`422
 /// no_query_window`). Protocol 66 adds `meta.member_modes` on live `mode`
 /// events. Protocol 67 changes generated protocol views and error token names,
-/// not the JSON wire data. This client uses the highest Grappa protocol version
-/// it implements and tests.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 67;
+/// not the JSON wire data. Protocol 68 refuses an IRC write with
+/// `not_registered` while the network has not registered the session; this
+/// client shows that the network is still connecting. This client uses the
+/// highest Grappa protocol version it implements and tests.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 68;
 
 /// The first Grappa `protocol_version` that sends `meta.member_modes` on a
 /// `mode` event. From this version the field is the only source of member
@@ -167,12 +169,12 @@ mod tests {
     }
 
     #[test]
-    fn client_declares_protocol_67_with_the_channel_rows() {
+    fn client_declares_protocol_68_with_the_channel_rows() {
         use crate::e2e_protocol::{
             channel_allowed, channel_door_allowed, PairingOperation, CHANNEL_DOOR_MIN_PROTOCOL,
             CHANNEL_MIN_PROTOCOL, PAIRING_OFFER_MIN_PROTOCOL,
         };
-        assert_eq!(CLIENT_PROTOCOL_VERSION, 67);
+        assert_eq!(CLIENT_PROTOCOL_VERSION, 68);
         assert_eq!(CHANNEL_DOOR_MIN_PROTOCOL, 62);
         assert_eq!(CHANNEL_MIN_PROTOCOL, 63);
         assert!(channel_allowed(Some(CLIENT_PROTOCOL_VERSION)));

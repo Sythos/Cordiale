@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Opt-in checks against a real Grappa server of protocol 66 or 67.
+//! Opt-in checks against a real Grappa server of protocol 66 to 68.
 //!
 //! These tests need a server that Cordiale cannot start by itself. They are
 //! `#[ignore]` and do not run in the normal test run. Run them with
@@ -32,11 +32,11 @@
 //! - `CORDIALE_LIVE_NETWORK`: the network id of that account.
 //!
 //! - `CORDIALE_LIVE_EXPECTED_PROTOCOL` (optional): the protocol of the target,
-//!   66 or 67. The first check fails if the server reports another value.
+//!   66, 67 or 68. The first check fails if the server reports another value.
 //!
 //! Add `--nocapture` to print the server protocol and minimum of each run.
-//! Run the checks once for a server at protocol 66 and once for a server at
-//! protocol 67. Record both lines in `docs/protocol-notes.md`.
+//! Run the checks once for each server protocol from 66 to 68. Record each
+//! line in `docs/protocol-notes.md`.
 //!
 //! The checks only read. They do not send a message and they do not change a
 //! list or a device. A mock server is not a substitute: do not point these
@@ -52,7 +52,7 @@ fn variable(name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 66 or 67 server: see the module comment"]
+#[ignore = "needs a protocol 66 to 68 server: see the module comment"]
 async fn the_live_server_speaks_the_protocol_of_the_client() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let config = client.fetch_config().await.expect("GET /api/config");
@@ -79,7 +79,7 @@ async fn the_live_server_speaks_the_protocol_of_the_client() {
         "the server protocol {} is below the supported minimum",
         config.protocol_version
     );
-    // Optional: name the target of this run (66 or 67). The run fails if the
+    // Optional: name the target of this run (66 to 68). The run fails if the
     // server reports a different protocol, so a result line never names a
     // server that was not checked.
     if let Ok(expected) = std::env::var("CORDIALE_LIVE_EXPECTED_PROTOCOL") {
@@ -97,12 +97,12 @@ async fn the_live_server_speaks_the_protocol_of_the_client() {
     );
 }
 
-/// The two current targets: Grappa v1.6.7 (protocol 66) and Grappa main
-/// (protocol 67). Both have minimum 1, so the client declaration of 67 is
-/// accepted by both. This check does not contact a server.
+/// The current targets: Grappa v1.6.7 (protocol 66), protocol 67 and Grappa
+/// v1.7.0 (protocol 68). All have minimum 1, so the client declaration of 68
+/// is accepted by all. This check does not contact a server.
 #[test]
-fn a_client_at_protocol_67_is_accepted_by_servers_at_protocol_66_and_67() {
-    for server_protocol in [66, 67] {
+fn a_client_at_protocol_68_is_accepted_by_servers_at_protocol_66_to_68() {
+    for server_protocol in [66, 67, 68] {
         let server = ServerCompatibility {
             protocol_version: server_protocol,
             min_protocol_version: 1,
@@ -113,7 +113,7 @@ fn a_client_at_protocol_67_is_accepted_by_servers_at_protocol_66_and_67() {
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 66 or 67 server: see the module comment"]
+#[ignore = "needs a protocol 66 to 68 server: see the module comment"]
 async fn the_live_server_answers_the_device_and_list_routes_in_the_known_shapes() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let token = variable("CORDIALE_LIVE_TOKEN");
