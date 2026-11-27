@@ -1473,6 +1473,14 @@ msgid "Couldn't build a ban mask for {}, so nobody was banned or kicked; /whois 
 msgstr "Impossible de construire le masque de bannissement pour {} : personne n'a été banni ni expulsé ; faites d'abord /whois ou changez le type de bannissement par défaut."
 
 msgctxt "AppWindow"
+msgid "The server did not send the host of {} in time. Nobody was banned or kicked. Try again."
+msgstr "Le serveur n'a pas envoyé à temps l'hôte de {}. Personne n'a été banni ni expulsé. Réessayez."
+
+msgctxt "AppWindow"
+msgid "No connection to get the host of {}. Nobody was banned or kicked. Try again after the reconnection."
+msgstr "Aucune connexion pour obtenir l'hôte de {}. Personne n'a été banni ni expulsé. Réessayez après la reconnexion."
+
+msgctxt "AppWindow"
 msgid "Default ban type"
 msgstr "Type de bannissement par défaut"
 

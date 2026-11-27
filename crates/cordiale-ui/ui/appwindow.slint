@@ -3752,6 +3752,10 @@ export component AppWindow inherits Window {
             return @tr("The alias {} needs a channel or a private conversation. Open one and try again.", status-command-hint);
         } else if status-kind == "kickban-mask-failed" {
             return @tr("Couldn't build a ban mask for {}, so nobody was banned or kicked; /whois them first or change the default ban type.", status-command-hint);
+        } else if status-kind == "kickban-lookup-timeout" {
+            return @tr("The server did not send the host of {} in time. Nobody was banned or kicked. Try again.", status-command-hint);
+        } else if status-kind == "kickban-lookup-disconnected" {
+            return @tr("No connection to get the host of {}. Nobody was banned or kicked. Try again after the reconnection.", status-command-hint);
         } else if status-kind == "command-topic" {
             return @tr("Topic of {}", status-command-hint);
         } else if status-kind == "command-no-topic" {

@@ -44,6 +44,133 @@ pub(crate) fn kickban_mask_failed(ui: &slint::Weak<AppWindow>, nick: &str) {
     });
 }
 
+/// Reports host lookups that ended without a reply: nobody is banned or
+/// kicked. The message replaces a connection status, so the reconnect
+/// countdown keeps its own copy of that status.
+pub(crate) fn kickban_lookup_failed(
+    ui: &slint::Weak<AppWindow>,
+    kind: &'static str,
+    nicks: String,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let current = ui.get_status_kind();
+        if current == "disconnected" || current == "reconnecting" {
+            ui.set_connection_status_kind(current);
+        } else if current == "signed-in" {
+            ui.set_connection_status_kind("".into());
+        }
+        ui.set_status_command_hint(nicks.into());
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// What a `phx_reply` ref means for the pending host lookups.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KickBanReply {
+    /// The reply to a lookup that is still in time.
+    Live(PendingKickBan),
+    /// The reply to a lookup after its deadline, before the timer ran.
+    TimedOut(PendingKickBan),
+    /// The reply to a lookup that already expired: ignore it.
+    Late,
+    /// Not the reply to a host lookup.
+    Unrelated,
+}
+
+/// Takes the lookup that `message_ref` answers, if any.
+pub(crate) fn take_kickban_reply(
+    state: &mut WorkerState,
+    message_ref: &str,
+    now: std::time::Instant,
+) -> KickBanReply {
+    if let Some(pending) = state.panels.pending_kickbans.remove(message_ref) {
+        if now < pending.deadline {
+            KickBanReply::Live(pending)
+        } else {
+            KickBanReply::TimedOut(pending)
+        }
+    } else if state.panels.expired_kickbans.remove(message_ref) {
+        KickBanReply::Late
+    } else {
+        KickBanReply::Unrelated
+    }
+}
+
+/// The earliest deadline of the pending host lookups.
+pub(crate) fn next_kickban_deadline(state: &WorkerState) -> Option<std::time::Instant> {
+    state
+        .panels
+        .pending_kickbans
+        .values()
+        .map(|pending| pending.deadline)
+        .min()
+}
+
+/// Removes the pending lookups that `expired` selects, remembers their refs
+/// and returns their nicks.
+fn expire_lookups(
+    state: &mut WorkerState,
+    expired: impl Fn(&PendingKickBan) -> bool,
+) -> Vec<String> {
+    let refs: Vec<String> = state
+        .panels
+        .pending_kickbans
+        .iter()
+        .filter(|(_, pending)| expired(pending))
+        .map(|(message_ref, _)| message_ref.clone())
+        .collect();
+    let mut nicks = Vec::new();
+    for message_ref in refs {
+        if let Some(pending) = state.panels.pending_kickbans.remove(&message_ref) {
+            nicks.push(pending.nick);
+            state.panels.expired_kickbans.insert(message_ref);
+        }
+    }
+    nicks.sort();
+    nicks
+}
+
+/// Expires the host lookups whose deadline is not after `now`.
+pub(crate) fn expire_kickban_lookups(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    now: std::time::Instant,
+) {
+    let nicks = expire_lookups(state, |pending| pending.deadline <= now);
+    if !nicks.is_empty() {
+        kickban_lookup_failed(ui, "kickban-lookup-timeout", nicks.join(", "));
+    }
+}
+
+/// The socket dropped: every pending host lookup ends now.
+pub(crate) fn drop_kickban_lookups(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    state.conn.socket_down = true;
+    let nicks = expire_lookups(state, |_| true);
+    if !nicks.is_empty() {
+        state.panels.dropped_kickbans.extend(nicks);
+        let nicks = state.panels.dropped_kickbans.join(", ");
+        kickban_lookup_failed(ui, "kickban-lookup-disconnected", nicks);
+    }
+}
+
+/// The session joined again. The reconnect statuses can hide the message of
+/// a dropped lookup, so it shows once more.
+pub(crate) fn report_dropped_kickban_lookups(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    state.conn.socket_down = false;
+    let nicks = std::mem::take(&mut state.panels.dropped_kickbans);
+    if !nicks.is_empty() {
+        kickban_lookup_failed(ui, "kickban-lookup-disconnected", nicks.join(", "));
+    }
+}
+
+/// The session ended or a new one starts: no lookup of the old one stays.
+pub(crate) fn forget_kickban_lookups(state: &mut WorkerState) {
+    state.conn.socket_down = false;
+    state.panels.pending_kickbans.clear();
+    state.panels.expired_kickbans.clear();
+    state.panels.dropped_kickbans.clear();
+}
+
 /// Fails closed: without a mask neither the ban nor the kick goes out (the
 /// failure is reported, for example for `not_cached`), and a channel that
 /// is no longer joined gets nothing.
@@ -368,11 +495,20 @@ pub(crate) async fn handle_frame(
             }
             None => {}
         }
-        if let Some(pending) = frame
-            .message_ref
-            .as_ref()
-            .and_then(|message_ref| state.panels.pending_kickbans.remove(message_ref))
-        {
+        let lookup = match frame.message_ref.as_deref() {
+            Some(message_ref) => take_kickban_reply(state, message_ref, std::time::Instant::now()),
+            None => KickBanReply::Unrelated,
+        };
+        let pending = match lookup {
+            KickBanReply::Live(pending) => Some(pending),
+            KickBanReply::TimedOut(pending) => {
+                kickban_lookup_failed(ui, "kickban-lookup-timeout", pending.nick);
+                return;
+            }
+            KickBanReply::Late => return,
+            KickBanReply::Unrelated => None,
+        };
+        if let Some(pending) = pending {
             let refused = state
                 .conn
                 .identifier
