@@ -5683,6 +5683,51 @@ fn two_accepted_joins_on_one_network_both_run() {
 }
 
 #[test]
+fn a_queued_result_of_a_detached_network_changes_nothing() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, _seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = parked_network_state(&url);
+    state.conn.identifier = Some("alice".to_string());
+    let runtime = network_test_runtime();
+    join_command(&mut state, &runtime);
+
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let done = runtime.block_on(async {
+        reconnect_join_accept(&mut state, &ui, &worker_tx);
+        worker_rx.recv().await
+    });
+    let Some(WorkerCommand::ReconnectJoinDone {
+        id, mut pending, ..
+    }) = done
+    else {
+        panic!("no result of an accepted join");
+    };
+    // This origin opens a window and marks its row on a failure.
+    pending.origin = JoinOrigin::Featured;
+    // The detach comes before the worker reads the result.
+    state.networks.network_ids.remove("libera");
+    state
+        .home
+        .retain_networks(&std::collections::HashSet::from(["oftc"]));
+
+    for outcome in [
+        ReconnectJoinOutcome::Joined,
+        ReconnectJoinOutcome::ReconnectFailed,
+        ReconnectJoinOutcome::JoinFailed,
+    ] {
+        let pending = pending.clone();
+        runtime.block_on(reconnect_join_done(&mut state, &ui, id, pending, outcome));
+    }
+    assert_eq!(
+        state.windows.current_channel,
+        Some(("oftc".to_string(), "#current".to_string()))
+    );
+    assert!(state.windows.recent_channels.is_empty());
+    assert!(state.home.row_errors.is_empty());
+    assert!(state.home.featured_errors.is_empty());
+}
+
+#[test]
 fn a_reconnect_answer_after_an_account_change_sends_nothing() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server_with(|_| (202, "{}"));
