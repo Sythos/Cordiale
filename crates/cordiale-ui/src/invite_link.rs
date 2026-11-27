@@ -259,11 +259,12 @@ pub(crate) enum AttachNext {
     Refused(&'static str),
 }
 
-/// A refusal is its HTTP status (`None` for a failure without one) and the
-/// `error` code of its body. `409 already_attached` is a race, not an
-/// error. A code that Grappa sends for an attach shows its reason. The code
-/// itself is never shown: any other one gets the message of its status.
-/// `network_not_visitor_enabled` and `not_found` mean "not available".
+/// The invite and the Home page share this mapper. A refusal is its HTTP
+/// status (`None` for a failure without one) and the `error` code of its
+/// body. `409 already_attached` is a race, not an error. A code that Grappa
+/// sends for an attach shows its reason. The code itself is never shown: an
+/// unknown one gets the generic message. `network_not_visitor_enabled`,
+/// `not_found` and a `4xx` without a code mean "not available".
 pub(crate) fn attach_next(result: Result<(), (Option<u16>, Option<&str>)>) -> AttachNext {
     let Err((status, code)) = result else {
         return AttachNext::Reread;
@@ -283,7 +284,9 @@ pub(crate) fn attach_next(result: Result<(), (Option<u16>, Option<&str>)>) -> At
         (Some("validation_failed"), _) => "invite-attach-settings",
         (Some("db_unavailable"), _) => "invite-attach-server-busy",
         (Some("rate_limited"), _) => "invite-attach-rate-limited",
-        (_, Some(400..=499)) => "invite-unavailable",
+        (Some("network_not_visitor_enabled" | "not_found"), _) | (None, Some(400..=499)) => {
+            "invite-unavailable"
+        }
         _ => "invite-attach-failed",
     })
 }
@@ -517,16 +520,19 @@ mod tests {
             attach_next(Err((Some(409), Some("already_attached")))),
             AttachNext::Reread
         );
-        // Denied, unknown or invalid, with no known reason: one message.
+        // Denied, unknown or invalid, with no code or `not_found`.
         for status in [400, 401, 403, 404, 422] {
-            for code in [None, Some("new_reason"), Some("not_found")] {
+            for code in [None, Some("not_found")] {
                 assert_eq!(
                     attach_next(Err((Some(status), code))),
                     AttachNext::Refused("invite-unavailable")
                 );
             }
         }
+        // An unknown code gets the generic message, whatever the status.
         for failure in [
+            (Some(400), Some("new_reason")),
+            (Some(403), Some("new_reason")),
             (Some(500), None),
             (Some(503), Some("new_reason")),
             (None, None),

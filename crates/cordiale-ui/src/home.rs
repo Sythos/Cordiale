@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 
 use cordiale_core::rest::{FeaturedChannel, MeResponse};
 
-use crate::invite_link::PendingInvite;
+use crate::invite_link::{AttachNext, PendingInvite};
 use crate::reconnect_join::{AbortOnDrop, PendingReconnectJoin};
 
 /// Who is signed in, as `GET /me` says.
@@ -129,6 +129,33 @@ impl HomeState {
         {
             self.available_error = None;
         }
+    }
+
+    /// Ends the connect of an available network. `next` comes from the shared
+    /// attach mapper, `failed` says that the request did not succeed, and `me`
+    /// is the new read of `/me`, if there is one. A refusal shows its reason.
+    /// An already attached network shows the generic message only if it stays
+    /// available.
+    pub(crate) fn finish_connect(
+        &mut self,
+        network: String,
+        next: AttachNext,
+        failed: bool,
+        me: Option<&MeResponse>,
+    ) {
+        self.connecting = None;
+        if let Some(me) = me {
+            self.apply_me(me);
+        }
+        let key = match next {
+            // The generic message of the Home page names the network.
+            AttachNext::Refused("invite-attach-failed") => Some("connect-failed"),
+            AttachNext::Refused(key) => Some(key),
+            AttachNext::Reread => {
+                (failed && self.available.contains(&network)).then_some("connect-failed")
+            }
+        };
+        self.available_error = key.map(|key| (network, key));
     }
 
     /// Drops per-row state of networks no longer attached.
@@ -283,6 +310,7 @@ pub(crate) fn remove_error_key(status: Option<u16>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::invite_link::attach_next;
     use cordiale_core::rest::MeResponse;
 
     fn me(value: serde_json::Value) -> MeResponse {
@@ -342,6 +370,75 @@ mod tests {
             Some(("oftc".into(), "connect-failed"))
         );
         assert_eq!(home.session_kind(), "user");
+    }
+
+    /// The state of the Home page after the attach request of `libera` got
+    /// `status` and `code`. `available` is the list of the new `/me` read.
+    fn connect_refused(status: u16, code: &str, available: Option<&[&str]>) -> HomeState {
+        let mut home = HomeState {
+            available: vec!["libera".into()],
+            connecting: Some("libera".into()),
+            ..HomeState::default()
+        };
+        let read = available.map(|slugs| {
+            let rows: Vec<_> = slugs
+                .iter()
+                .map(|slug| serde_json::json!({ "slug": slug }))
+                .collect();
+            me(serde_json::json!({
+                "kind": "user",
+                "home_data": {"networks": [], "available_networks": rows}
+            }))
+        });
+        let next = attach_next(Err((Some(status), Some(code))));
+        home.finish_connect("libera".into(), next, true, read.as_ref());
+        assert_eq!(home.connecting, None);
+        home
+    }
+
+    #[test]
+    fn a_refused_connect_shows_its_reason() {
+        for (status, code, key) in [
+            (503, "network_busy", "invite-attach-full"),
+            (503, "too_many_sessions", "invite-attach-sessions"),
+            (503, "network_unreachable", "invite-attach-unreachable"),
+            (502, "upstream_unreachable", "invite-attach-unreachable"),
+            (404, "not_found", "invite-unavailable"),
+            (503, "new_reason", "connect-failed"),
+            (400, "new_reason", "connect-failed"),
+        ] {
+            let home = connect_refused(status, code, None);
+            assert_eq!(home.available_error, Some(("libera".into(), key)), "{code}");
+        }
+    }
+
+    #[test]
+    fn an_already_attached_network_is_read_again_before_an_error() {
+        // The new read does not offer the network: no message.
+        let home = connect_refused(409, "already_attached", Some(&[]));
+        assert!(home.available.is_empty());
+        assert_eq!(home.available_error, None);
+        // The network stays available, or the read failed.
+        for read in [Some(&["libera"][..]), None] {
+            let home = connect_refused(409, "already_attached", read);
+            assert_eq!(
+                home.available_error,
+                Some(("libera".into(), "connect-failed"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_successful_connect_shows_no_error() {
+        let mut home = HomeState {
+            available: vec!["libera".into()],
+            connecting: Some("libera".into()),
+            ..HomeState::default()
+        };
+        // The new read failed: the push of the server brings the network.
+        home.finish_connect("libera".into(), attach_next(Ok(())), false, None);
+        assert_eq!(home.connecting, None);
+        assert_eq!(home.available_error, None);
     }
 
     #[test]
