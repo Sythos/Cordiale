@@ -2405,6 +2405,10 @@ msgid "This server has reached its guest session limit for your connection. Sign
 msgstr "Este servidor ha alcanzado el límite de sesiones de invitado para tu conexión. Cierra otra sesión de invitado o inténtalo más tarde."
 
 msgctxt "AppWindow"
+msgid "The network is full. Try again later."
+msgstr "La red está llena. Inténtalo más tarde."
+
+msgctxt "AppWindow"
 msgid "Disconnected here, but the server did not confirm guest sign-out. Your nickname may remain reserved; reconnect to try again."
 msgstr "Desconectado aquí, pero el servidor no confirmó la salida del invitado. Tu apodo puede seguir reservado; vuelve a conectarte para intentarlo de nuevo."
 

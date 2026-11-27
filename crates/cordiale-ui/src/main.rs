@@ -14926,6 +14926,8 @@ fn login_refusal_kind(code: &str) -> Option<&'static str> {
         "malformed_nick" => Some("guest-nick-invalid"),
         "captcha_required" => Some("guest-captcha-required"),
         "too_many_sessions" | "ip_cap_exceeded" => Some("guest-too-many-sessions"),
+        // The limit of the network, not of this source address.
+        "network_busy" => Some("guest-network-full"),
         _ => None,
     }
 }

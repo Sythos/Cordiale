@@ -501,6 +501,10 @@ fn guest_login_refusals_get_their_own_status() {
         login_refusal_kind("too_many_sessions"),
         Some("guest-too-many-sessions")
     );
+    assert_eq!(
+        login_refusal_kind("network_busy"),
+        Some("guest-network-full")
+    );
 }
 
 #[test]
@@ -529,6 +533,7 @@ fn transient_guest_login_failures_preserve_the_previous_bearer() {
         })
     };
     assert!(!stale_guest_bearer(&refused("503", "too_many_sessions")));
+    assert!(!stale_guest_bearer(&refused("503", "network_busy")));
     assert!(!stale_guest_bearer(&refused("429", "too_many_attempts")));
     assert!(stale_guest_bearer(&refused("409", "anon_collision")));
     assert!(stale_guest_bearer(&BootstrapError::Login(
