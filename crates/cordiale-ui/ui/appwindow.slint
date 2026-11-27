@@ -3097,7 +3097,8 @@ export component AppWindow inherits Window {
         } else if key == "connect-failed" {
             return @tr("Couldn't connect {}.", network);
         } else {
-            return key;
+            // The attach refusals have the same text as for an invite.
+            return invite-error-text(key);
         }
     }
 

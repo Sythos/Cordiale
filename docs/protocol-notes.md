@@ -2233,7 +2233,7 @@ writes an IRC line. The error is `not_registered`. Grappa sends nothing.
   Cordiale asks each time, because issue 965 requires it for `/join` and the Home page. If the network parks
   after the JOIN question of an invite, Cordiale asks the reconnect question.
 
-Refusals of `POST /session/networks` and the message of the invite:
+Refusals of `POST /session/networks` and the message of the invite and of the Home connect:
 
 | Status and code | Cordiale message |
 | --- | --- |
@@ -2245,8 +2245,12 @@ Refusals of `POST /session/networks` and the message of the invite:
 | `422 validation_failed` | The server refused the account settings |
 | `503 db_unavailable` | Grappa is busy |
 | `429 rate_limited` | Too many requests |
-| `403 network_not_visitor_enabled`, `404 not_found`, other `4xx` | The network is not available |
-| Any other failure | Generic message |
+| `403 network_not_visitor_enabled`, `404 not_found`, a `4xx` without a code | The network is not available |
+| Any other failure, also an unknown code | Generic message |
+
+- **Home (issue 970):** Home and the invite use the same mapper (`attach_next`). On Home, the generic message
+  names the network. After `409 already_attached`, Home shows this message only if the new `/me` read still
+  offers the network, or if the read fails.
 
 - **Why Cordiale declares 68:** it handles the new refusal, and tests cover it. The minimum stays 1, because
   Cordiale needs no new field from the server.

@@ -10062,7 +10062,8 @@ async fn home_remove_network(
 
 /// Home page one-tap connect of an available network. `network_attached`
 /// brings the new row; `/me` is re-read here too so the button leaves the
-/// available list even if that push is late.
+/// available list even if that push is late. An already attached network
+/// is read again the same way; any other refusal shows its reason.
 async fn home_connect_network(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -10077,19 +10078,25 @@ async fn home_connect_network(
     state.home.connecting = Some(network.clone());
     state.home.available_error = None;
     push_home(state, ui);
-    let result = client.attach_network(&token, &network).await;
-    state.home.connecting = None;
-    match result {
-        Ok(()) => {
-            if let Ok(me) = client.fetch_me(&token).await {
-                state.home.apply_me(&me);
-            }
-        }
-        Err(err) => {
+    let result = client
+        .attach_network(&token, &network)
+        .await
+        .inspect_err(|err| {
             persistence::log_line(&format!("network connect failed: {err:?}"));
-            state.home.available_error = Some((network, "connect-failed"));
-        }
-    }
+        });
+    let next = invite_link::attach_next(
+        result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|err| (err.status().map(|status| status.as_u16()), err.code())),
+    );
+    let me = match next {
+        invite_link::AttachNext::Reread => client.fetch_me(&token).await.ok(),
+        invite_link::AttachNext::Refused(_) => None,
+    };
+    state
+        .home
+        .finish_connect(network, next, result.is_err(), me.as_ref());
     push_home(state, ui);
 }
 
