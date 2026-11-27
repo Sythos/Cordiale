@@ -6001,7 +6001,151 @@ fn pending_kickban(ban_type: cordiale_core::ban::BanType) -> PendingKickBan {
         nick: "troll".to_string(),
         kick_reason: Some("bye".to_string()),
         ban_type,
+        deadline: std::time::Instant::now() + KICKBAN_LOOKUP_TIMEOUT,
     }
+}
+
+/// A state with one pending host lookup under the ref `t1`.
+fn pending_lookup_state() -> (WorkerState, PendingKickBan) {
+    let pending = pending_kickban(cordiale_core::ban::BanType::Host);
+    let mut state = WorkerState::new();
+    state
+        .panels
+        .pending_kickbans
+        .insert("t1".to_string(), pending.clone());
+    (state, pending)
+}
+
+#[test]
+fn a_reply_in_time_completes_the_host_lookup_once() {
+    let (mut state, pending) = pending_lookup_state();
+    let now = std::time::Instant::now();
+    assert_eq!(
+        frames::take_kickban_reply(&mut state, "t2", now),
+        frames::KickBanReply::Unrelated
+    );
+    assert_eq!(
+        frames::take_kickban_reply(&mut state, "t1", now),
+        frames::KickBanReply::Live(pending)
+    );
+    assert!(state.panels.pending_kickbans.is_empty());
+    assert_eq!(frames::next_kickban_deadline(&state), None);
+}
+
+#[test]
+fn an_unanswered_host_lookup_expires_at_its_deadline() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (mut state, pending) = pending_lookup_state();
+    assert_eq!(
+        frames::next_kickban_deadline(&state),
+        Some(pending.deadline)
+    );
+
+    let early = pending.deadline - std::time::Duration::from_millis(1);
+    frames::expire_kickban_lookups(&mut state, &ui, early);
+    assert_eq!(state.panels.pending_kickbans.len(), 1);
+
+    frames::expire_kickban_lookups(&mut state, &ui, pending.deadline);
+    assert!(state.panels.pending_kickbans.is_empty());
+    assert_eq!(frames::next_kickban_deadline(&state), None);
+    // The late reply finds no action to start.
+    assert_eq!(
+        frames::take_kickban_reply(&mut state, "t1", pending.deadline),
+        frames::KickBanReply::Late
+    );
+}
+
+#[test]
+fn a_reply_after_the_deadline_does_not_complete_the_lookup() {
+    let (mut state, pending) = pending_lookup_state();
+    let deadline = pending.deadline;
+    assert_eq!(
+        frames::take_kickban_reply(&mut state, "t1", deadline),
+        frames::KickBanReply::TimedOut(pending)
+    );
+    assert!(state.panels.pending_kickbans.is_empty());
+}
+
+#[test]
+fn a_disconnect_clears_the_host_lookups_and_ignores_late_replies() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (mut state, _) = pending_lookup_state();
+    frames::drop_kickban_lookups(&mut state, &ui);
+    assert!(state.conn.socket_down);
+    assert!(state.panels.pending_kickbans.is_empty());
+    assert_eq!(state.panels.dropped_kickbans, ["troll"]);
+
+    // A late error reply is consumed: it is not a "command refused".
+    let runtime = network_test_runtime();
+    runtime.block_on(frames::handle_frame(
+        &mut state,
+        &ui,
+        cordiale_core::phoenix::PhoenixMessage {
+            join_ref: None,
+            message_ref: Some("t1".to_string()),
+            topic: "grappa:user:ada".to_string(),
+            event: "phx_reply".to_string(),
+            payload: serde_json::json!({
+                "status": "error",
+                "response": {"error": "not_cached"}
+            }),
+        },
+    ));
+    assert!(state.panels.expired_kickbans.is_empty());
+
+    frames::report_dropped_kickban_lookups(&mut state, &ui);
+    assert!(!state.conn.socket_down);
+    assert!(state.panels.dropped_kickbans.is_empty());
+}
+
+#[test]
+fn no_host_lookup_starts_without_a_connection() {
+    use cordiale_core::ban::BanType;
+    let ui = slint::Weak::<AppWindow>::default();
+    let runtime = network_test_runtime();
+    let _guard = runtime.enter();
+    let (session, _events) = spawn_session(
+        "ws://127.0.0.1:9/socket".to_string(),
+        "token".to_string(),
+        "ada".to_string(),
+    );
+    let mut state = WorkerState::new();
+    state.conn.session = Some(session);
+    state.conn.identifier = Some("ada".to_string());
+    state.networks.network_ids.insert("libera".to_string(), 1);
+    // The slash commands and the member menu share this entry point.
+    let start = |state: &mut WorkerState| {
+        slash::start_kickban(
+            state,
+            &ui,
+            "libera",
+            "#rust".to_string(),
+            "troll".to_string(),
+            None,
+            BanType::Host,
+        );
+    };
+
+    frames::drop_kickban_lookups(&mut state, &ui);
+    start(&mut state);
+    assert!(state.panels.pending_kickbans.is_empty());
+
+    frames::report_dropped_kickban_lookups(&mut state, &ui);
+    start(&mut state);
+    assert_eq!(state.panels.pending_kickbans.len(), 1);
+}
+
+#[test]
+fn an_ended_session_keeps_no_host_lookup() {
+    let (mut state, _) = pending_lookup_state();
+    state.panels.expired_kickbans.insert("t2".to_string());
+    state.panels.dropped_kickbans.push("troll".to_string());
+    state.conn.socket_down = true;
+    frames::forget_kickban_lookups(&mut state);
+    assert!(state.panels.pending_kickbans.is_empty());
+    assert!(state.panels.expired_kickbans.is_empty());
+    assert!(state.panels.dropped_kickbans.is_empty());
+    assert!(!state.conn.socket_down);
 }
 
 #[test]

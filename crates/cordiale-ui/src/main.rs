@@ -1386,6 +1386,12 @@ struct PanelState {
     admin_network_count_for: Option<String>,
     /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
     pending_kickbans: HashMap<String, PendingKickBan>,
+    /// Refs of the lookups that timed out or lost the connection: a late
+    /// reply to one of them is ignored.
+    expired_kickbans: HashSet<String>,
+    /// Nicks of the lookups that a disconnect dropped, reported again after
+    /// the reconnect.
+    dropped_kickbans: Vec<String>,
     /// Identity-recovery panel driven entirely by server pushes; `None`
     /// until the first `recover_progress` and again after a dismiss.
     recover_panel: Option<RecoverPanel>,
@@ -1623,6 +1629,8 @@ struct SessionState {
     /// The name typed at sign-in, which keys the remembered profile.
     login_identifier: Option<String>,
     session: Option<SessionHandle>,
+    /// The session lost its socket and has not joined again yet.
+    socket_down: bool,
     joined_topics: std::collections::HashSet<String>,
     /// The server's `protocol_version`, from `/api/config` at sign-in and
     /// again from the user-topic join reply. `None` until known; see
@@ -1869,6 +1877,7 @@ impl WorkerState {
                 identifier: None,
                 login_identifier: None,
                 session: None,
+                socket_down: false,
                 joined_topics: std::collections::HashSet::new(),
                 server_protocol_version: None,
                 chat_rebuild_tx: None,
@@ -1931,6 +1940,8 @@ impl WorkerState {
                 admin_uploads: None,
                 admin_network_count_for: None,
                 pending_kickbans: HashMap::new(),
+                expired_kickbans: HashSet::new(),
+                dropped_kickbans: Vec::new(),
                 recover_panel: None,
                 reply_view: None,
                 whois_card: None,
@@ -2045,8 +2056,18 @@ async fn run_worker(
                 None => std::future::pending().await,
             }
         };
+        let lookup_due = frames::next_kickban_deadline(&state);
+        let next_lookup_deadline = async move {
+            match lookup_due {
+                Some(due) => tokio::time::sleep_until(due.into()).await,
+                None => std::future::pending().await,
+            }
+        };
 
         tokio::select! {
+            _ = next_lookup_deadline => {
+                frames::expire_kickban_lookups(&mut state, &ui, std::time::Instant::now());
+            }
             command = commands.recv() => {
                 match command {
                     None => return,
@@ -2922,6 +2943,7 @@ async fn run_worker(
                         if let Some(handle) = state.conn.session.take() {
                             drop(handle.close());
                         }
+                        frames::forget_kickban_lookups(&mut state);
                         // Close the sealed E2E files of this account.
                         state.e2e = E2eRuntime::default();
                         let guest_logout_failed = if state.conn.guest_session {
@@ -3106,6 +3128,7 @@ async fn run_worker(
                             ui.set_status_message("".into());
                             ui.set_status_retry_secs(0);
                         });
+                        frames::report_dropped_kickban_lookups(&mut state, &ui);
                         request_watch_patterns(&mut state);
                         // Send again the read cursors that the server did not
                         // confirm before the socket dropped.
@@ -3159,6 +3182,7 @@ async fn run_worker(
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
                         });
+                        frames::drop_kickban_lookups(&mut state, &ui);
                     }
                     Some(SessionEvent::Reconnecting { reason, retry_in }) => {
                         persistence::log_line(&format!(
@@ -3180,12 +3204,14 @@ async fn run_worker(
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
                         });
+                        frames::drop_kickban_lookups(&mut state, &ui);
                     }
                     Some(SessionEvent::JoinRefused { reason }) => {
                         // Stopped for good: retrying the same topics can't work.
                         persistence::log_line(&format!("session join refused: {reason}"));
                         state.conn.session = None;
                         session_events = None;
+                        frames::forget_kickban_lookups(&mut state);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("session-refused".into());
                             ui.set_status_message(reason.into());
@@ -3198,6 +3224,7 @@ async fn run_worker(
                         persistence::log_line(&format!("session certificate rejected: {reason}"));
                         state.conn.session = None;
                         session_events = None;
+                        frames::forget_kickban_lookups(&mut state);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("certificate-untrusted".into());
                             ui.set_status_message(reason.into());
@@ -3214,6 +3241,7 @@ async fn run_worker(
                         ));
                         state.conn.session = None;
                         session_events = None;
+                        frames::forget_kickban_lookups(&mut state);
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("upgrade-required".into());
                             ui.set_status_message("".into());
@@ -3589,6 +3617,8 @@ async fn finish_connect(
             state.conn.identifier = Some(session_identifier.clone());
             state.conn.login_identifier = Some(identifier.clone());
             state.conn.session = Some(handle);
+            // A new session starts its tracked refs again.
+            frames::forget_kickban_lookups(state);
             state.conn.joined_topics = entries
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
@@ -5977,6 +6007,10 @@ async fn run_ban_type_save(
     }
 }
 
+/// How long a `resolve_userhost` reply may take before the action expires.
+/// It is separate from the REST request timeout.
+const KICKBAN_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A `/kb`, Kickban or Ban host waiting for the target's host; the kick
 /// follows the ban only when `kick_reason` is set. The ban form is fixed
 /// when the request starts, so changing the setting meanwhile doesn't
@@ -5988,6 +6022,8 @@ struct PendingKickBan {
     nick: String,
     kick_reason: Option<String>,
     ban_type: cordiale_core::ban::BanType,
+    /// The lookup expires at this time.
+    deadline: std::time::Instant,
 }
 
 /// Shows a slash-command outcome in the status bar; `hint` fills its `{}`.
@@ -13427,6 +13463,7 @@ fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flo
     if let Some(handle) = state.conn.session.take() {
         handle.shutdown();
     }
+    frames::forget_kickban_lookups(state);
     if let (Some(client), Some(identifier)) = (
         state.conn.client.as_ref(),
         state.conn.login_identifier.as_deref(),

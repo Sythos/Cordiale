@@ -691,7 +691,8 @@ pub(crate) fn joined_channels(state: &WorkerState, network: &str) -> Vec<String>
 
 /// Asks Grappa for the target's `user@host` (from its userhost cache); the
 /// ban (and the kick, with `Some(reason)`) follow in `finish_kickban` when
-/// the reply arrives. The nick form needs no lookup and goes out at once.
+/// the reply arrives before the deadline. The nick form needs no lookup and
+/// goes out at once. Without a connection, no lookup starts.
 pub(crate) fn start_kickban(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -707,12 +708,18 @@ pub(crate) fn start_kickban(
         nick,
         kick_reason,
         ban_type,
+        deadline: std::time::Instant::now() + KICKBAN_LOOKUP_TIMEOUT,
     };
     if !ban_type.needs_userhost() {
         match ban_type.mask(&pending.nick, None, None) {
             Ok(mask) => send_kickban(state, &pending, &mask),
             Err(_) => kickban_mask_failed(ui, &pending.nick),
         }
+        return;
+    }
+    // The session would hold the lookup and send it after the reconnect.
+    if state.conn.socket_down {
+        kickban_lookup_failed(ui, "kickban-lookup-disconnected", pending.nick);
         return;
     }
     let (Some(session), Some(identifier), Some(&network_id)) = (
