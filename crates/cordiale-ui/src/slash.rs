@@ -440,20 +440,11 @@ pub(crate) async fn run_slash_command(
         }
         SlashCommand::Highlight { add, pattern } => {
             let action = if add { "add" } else { "del" };
-            send_user_topic_verb(
+            send_watchlist_request(
                 state,
-                "watchlist",
+                ui,
                 serde_json::json!({ "action": action, "pattern": pattern }),
             );
-            if !add {
-                state
-                    .prefs
-                    .watch_patterns
-                    .retain(|existing| existing != &pattern);
-            } else if !state.prefs.watch_patterns.contains(&pattern) {
-                state.prefs.watch_patterns.push(pattern);
-            }
-            push_watch_patterns(state, ui);
             Ok(())
         }
         SlashCommand::Ignore {

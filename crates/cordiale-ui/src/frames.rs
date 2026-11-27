@@ -476,13 +476,24 @@ pub(crate) async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
-        if frame.message_ref.is_some() && frame.message_ref == state.prefs.pending_watchlist_ref {
-            state.prefs.pending_watchlist_ref = None;
-            if let Some(patterns) = watch_patterns_from_reply(&frame.payload) {
+        match frame.message_ref.as_deref().and_then(|message_ref| {
+            state
+                .prefs
+                .watchlist
+                .take_reply(message_ref, &frame.payload)
+        }) {
+            Some(WatchlistReply::Accepted(patterns)) => {
                 state.prefs.watch_patterns = patterns;
                 push_watch_patterns(state, ui);
+                show_watchlist_error(ui, None);
+                return;
             }
-            return;
+            Some(WatchlistReply::Ignored) => return,
+            // The status bar shows the reason, as for any refused command.
+            Some(WatchlistReply::Refused) => {
+                show_watchlist_error(ui, Some(WatchlistFailure::Refused));
+            }
+            None => {}
         }
         let lookup = match frame.message_ref.as_deref() {
             Some(message_ref) => take_kickban_reply(state, message_ref, std::time::Instant::now()),

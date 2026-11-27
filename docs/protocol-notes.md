@@ -1092,12 +1092,16 @@ arriva da `presence_snapshot`/`presence_changed`.
 
 **Watchlist per parola chiave** — **non REST**: push WS
 `ch.push("watchlist", {action: "add"|"del"|"list", pattern})` sul
-topic utente (mai un endpoint `/highlight*` nel router). Cordiale usa
-`SessionHandle::send_command` (già esistente per `/links`) per inviare
-`add`/`del`; la risposta a `"list"` non ha una forma confermata da
-fonte primaria, quindi non viene interpretata — stessa limitazione
-session-local: la UI mostra solo le modifiche tracciate in questa sessione,
-non una lista recuperata dal server.
+topic utente (mai un endpoint `/highlight*` nel router). Verificato sul
+sorgente del server (`GrappaWeb.GrappaChannel`): tutte e tre le azioni
+rispondono `ok` con `{patterns: [string]}` (la lista risultante) oppure
+`error` con `{error: ...}` (`save_failed`, `not_found` per il `del` di un
+pattern assente). Cordiale traccia ogni push con
+`SessionHandle::send_tracked_command` e cambia la lista locale solo con una
+risposta `ok`. Una richiesta senza risposta scade dopo 15 secondi o alla
+caduta della connessione, con un errore a schermo; la risposta tardiva è
+ignorata. A ogni riconnessione la lista viene richiesta di nuovo. Non
+ancora provato contro un server reale.
 
 **Profilo esteso e avatar** (Settings → Generale → Profilo di rete) — `PATCH /networks/:slug/profile` con `{age?, gender?, location?, languages?, custom?}` (stringhe; campo omesso = invariato, `""` = cancella). `gender` ammette solo `male`, `female`, `nonbinary` o vuoto; gli altri quattro campi al massimo 100 byte (non caratteri) e senza CR/LF/NUL, altrimenti `422`. Non riavvia la connessione. `PUT /networks/:slug/avatar` è multipart con campo `file`: stessa allowlist MIME e stesso tetto per file delle immagini di `POST /api/uploads` (`415` tipo non immagine, `413` oltre il tetto, `507` spazio esaurito), `400` se il file manca; `DELETE /networks/:slug/avatar` risponde `200` anche senza avatar. Le tre chiamate rispondono con la credenziale aggiornata (`avatar_url`, `null` se assente). Cordiale invia solo i campi cambiati rispetto all'ultimo valore letto da `GET /networks`. Verificato sul codice del server, non ancora provato contro un server reale.
 

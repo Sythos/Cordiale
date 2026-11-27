@@ -2486,6 +2486,8 @@ export component AppWindow inherits Window {
     in property <[NotifyRow]> settings-notify-nicks: [];
     in-out property <string> new-notify-nick: "";
     in property <[string]> settings-watch-patterns: [];
+    // "" or why the server did not confirm the last watchlist request.
+    in property <string> settings-watch-error: "";
     in-out property <string> new-watch-pattern: "";
 
     callback connect-requested(string, string, string);
@@ -3735,6 +3737,10 @@ export component AppWindow inherits Window {
             return @tr("Avatar removed.");
         } else if status-kind == "avatar-remove-failed" {
             return @tr("Couldn't remove the avatar.");
+        } else if status-kind == "watchlist-no-reply" {
+            return @tr("The server did not answer the watchlist request. The list can be out of date.");
+        } else if status-kind == "watchlist-connection-lost" {
+            return @tr("No connection: the server did not confirm the watchlist request.");
         } else if status-kind == "command-refused" {
             return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
@@ -8716,6 +8722,14 @@ export component AppWindow inherits Window {
                                 new-watch-pattern = "";
                             }
                         }
+                    }
+                    if settings-watch-error != "" : Text {
+                        text: settings-watch-error == "no-reply"
+                            ? @tr("The server did not answer the watchlist request. The list can be out of date.")
+                            : (settings-watch-error == "connection-lost"
+                                ? @tr("No connection: the server did not confirm the watchlist request.")
+                                : @tr("The server refused the watchlist request."));
+                        wrap: word-wrap;
                     }
                 }
             }
