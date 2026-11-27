@@ -75,6 +75,7 @@ mod temp_files;
 mod totp;
 mod ui_callbacks;
 mod unread_divider;
+mod watchlist;
 #[cfg(windows)]
 mod webauthn_windows;
 mod window_state;
@@ -139,6 +140,7 @@ use queries::*;
 use reconnect_join::{JoinOrigin, PendingReconnectJoin, ReconnectJoinOutcome};
 use slash::*;
 use ui_callbacks::*;
+use watchlist::*;
 use worker_commands::*;
 
 /// The default server offered on first launch.
@@ -1467,14 +1469,11 @@ struct SettingsState {
     /// Last announced web-client bundle `(hash, version)`, only to log a
     /// change once; it names Cicchetto's build, not this app.
     web_bundle: Option<(String, Option<String>)>,
-    /// Session-local only: the keyword watchlist has no documented `list`
-    /// reply shape (see `docs/protocol-notes.md` §4quater). It is cleared on
-    /// disconnect or relaunch; an automatic reconnect keeps it as it was,
-    /// possibly stale.
+    /// The keyword patterns of the last accepted `watchlist` reply. Cleared
+    /// on disconnect or relaunch; a reconnect asks for the list again.
     watch_patterns: Vec<String>,
-    /// Ref of the `watchlist` list request whose reply holds the account's
-    /// keyword patterns.
-    pending_watchlist_ref: Option<String>,
+    /// The `watchlist` requests that wait for a reply.
+    watchlist: WatchlistRequests,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
     /// pick a legible color without an extra hop to the UI thread.
@@ -1918,7 +1917,7 @@ impl WorkerState {
                 notification_prefs: None,
                 web_bundle: None,
                 watch_patterns: Vec::new(),
-                pending_watchlist_ref: None,
+                watchlist: WatchlistRequests::default(),
                 theme: settings.theme,
                 theme_choices: builtin_theme_choices(),
                 theme_pair: None,
@@ -2046,7 +2045,19 @@ async fn run_worker(
             }
         };
 
+        let watchlist_deadline = state.prefs.watchlist.next_deadline();
+        let watchlist_timeout = async move {
+            match watchlist_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
+            () = watchlist_timeout => {
+                expire_watchlist_requests(&mut state, &ui, std::time::Instant::now());
+            }
+
             command = commands.recv() => {
                 match command {
                     None => return,
@@ -3106,7 +3117,8 @@ async fn run_worker(
                             ui.set_status_message("".into());
                             ui.set_status_retry_secs(0);
                         });
-                        request_watch_patterns(&mut state);
+                        report_lost_watchlist_requests(&mut state, &ui);
+                        request_watch_patterns(&mut state, &ui);
                         // Send again the read cursors that the server did not
                         // confirm before the socket dropped.
                         flush_read_cursor_sync(&mut state);
@@ -3144,6 +3156,7 @@ async fn run_worker(
                             "session disconnected: {reason}, retrying in {retry_in:?}"
                         ));
                         note_catch_up_anchors(&mut state);
+                        lose_watchlist_requests(&mut state, &ui);
                         end_e2e_sessions(&mut state, &ui);
                         reset_query_session_readiness(&mut state);
                         state.conn.own_listener_ready.clear();
@@ -3165,6 +3178,7 @@ async fn run_worker(
                             "session reconnecting: {reason}, retrying in {retry_in:?}"
                         ));
                         note_catch_up_anchors(&mut state);
+                        lose_watchlist_requests(&mut state, &ui);
                         end_e2e_sessions(&mut state, &ui);
                         reset_query_session_readiness(&mut state);
                         state.conn.own_listener_ready.clear();
@@ -3184,6 +3198,7 @@ async fn run_worker(
                     Some(SessionEvent::JoinRefused { reason }) => {
                         // Stopped for good: retrying the same topics can't work.
                         persistence::log_line(&format!("session join refused: {reason}"));
+                        lose_watchlist_requests(&mut state, &ui);
                         state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3196,6 +3211,7 @@ async fn run_worker(
                         // Stopped for good: the server's certificate stays
                         // untrusted until the store or the server changes.
                         persistence::log_line(&format!("session certificate rejected: {reason}"));
+                        lose_watchlist_requests(&mut state, &ui);
                         state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3212,6 +3228,7 @@ async fn run_worker(
                         persistence::log_line(&format!(
                             "session upgrade required: declared client_proto={CLIENT_PROTOCOL_VERSION}, server protocol_version={protocol_version:?}, min_protocol_version={min_protocol_version:?}"
                         ));
+                        lose_watchlist_requests(&mut state, &ui);
                         state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
@@ -3517,6 +3534,9 @@ async fn finish_connect(
             state.prefs.quit_part_reason = None;
             state.prefs.auto_away_reason = None;
             state.prefs.away_nick_suffix = None;
+            // The refs of a new session start again at the first one.
+            state.prefs.watchlist = WatchlistRequests::default();
+            show_watchlist_error(ui, None);
             state.panels.lusers_requested.clear();
             close_directory(state, ui);
             state.panels.dcc_offers.clear();
@@ -7773,21 +7793,11 @@ fn presence_key(nick: &str) -> String {
     cordiale_core::isupport::CaseMapping::Ascii.fold(nick)
 }
 
-/// Pushes the session-local keyword-watchlist patterns to the UI — see
-/// `SettingsState::watch_patterns` for why they are session-local.
 /// Asks Grappa for the account's keyword patterns (`watchlist` with
 /// `action: "list"`), so the list reflects what other clients changed too;
-/// the reply is matched by its ref.
-fn request_watch_patterns(state: &mut WorkerState) {
-    let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) else {
-        return;
-    };
-    let message_ref = session.send_tracked_command(
-        format!("grappa:user:{identifier}"),
-        "watchlist",
-        serde_json::json!({ "action": "list" }),
-    );
-    state.prefs.pending_watchlist_ref = Some(message_ref);
+/// the reply is matched by its ref and has a deadline.
+fn request_watch_patterns(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    send_watchlist_request(state, ui, serde_json::json!({ "action": "list" }));
 }
 
 /// The `GET /networks` row of `network`.
@@ -7990,6 +8000,7 @@ async fn handle_avatar_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
     }
 }
 
+/// Pushes the keyword-watchlist patterns to the UI.
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
         .prefs

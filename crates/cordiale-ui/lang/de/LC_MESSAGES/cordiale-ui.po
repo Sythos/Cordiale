@@ -1441,6 +1441,18 @@ msgid "The server refused that command ({})."
 msgstr "Der Server hat diesen Befehl abgelehnt ({})."
 
 msgctxt "AppWindow"
+msgid "The server did not answer the watchlist request. The list can be out of date."
+msgstr "Der Server hat nicht auf die Anfrage zur Beobachtungsliste geantwortet. Die Liste ist vielleicht veraltet."
+
+msgctxt "AppWindow"
+msgid "No connection: the server did not confirm the watchlist request."
+msgstr "Keine Verbindung: Der Server hat die Anfrage zur Beobachtungsliste nicht bestätigt."
+
+msgctxt "AppWindow"
+msgid "The server refused the watchlist request."
+msgstr "Der Server hat die Anfrage zur Beobachtungsliste abgelehnt."
+
+msgctxt "AppWindow"
 msgid "Zoom out"
 msgstr "Verkleinern"
 

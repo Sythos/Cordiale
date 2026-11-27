@@ -669,17 +669,11 @@ pub(crate) fn run_watch_pattern_add(
     ui: &slint::Weak<AppWindow>,
     pattern: String,
 ) {
-    if let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) {
-        session.send_command(
-            format!("grappa:user:{identifier}"),
-            "watchlist",
-            serde_json::json!({"action": "add", "pattern": pattern}),
-        );
-    }
-    if !state.prefs.watch_patterns.contains(&pattern) {
-        state.prefs.watch_patterns.push(pattern);
-    }
-    push_watch_patterns(state, ui);
+    send_watchlist_request(
+        state,
+        ui,
+        serde_json::json!({"action": "add", "pattern": pattern}),
+    );
 }
 
 /// Body of the `WorkerCommand::WatchPatternRemove` arm of `run_worker`.
@@ -688,16 +682,9 @@ pub(crate) fn run_watch_pattern_remove(
     ui: &slint::Weak<AppWindow>,
     pattern: String,
 ) {
-    if let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) {
-        session.send_command(
-            format!("grappa:user:{identifier}"),
-            "watchlist",
-            serde_json::json!({"action": "del", "pattern": pattern}),
-        );
-    }
-    state
-        .prefs
-        .watch_patterns
-        .retain(|existing| existing != &pattern);
-    push_watch_patterns(state, ui);
+    send_watchlist_request(
+        state,
+        ui,
+        serde_json::json!({"action": "del", "pattern": pattern}),
+    );
 }
