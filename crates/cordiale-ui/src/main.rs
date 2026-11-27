@@ -10167,7 +10167,10 @@ async fn reconnect_join_done(
         origin,
         ..
     } = pending;
-    state.home.reconnect_tasks.remove(&id);
+    // A detach removed the operation: its queued result no longer applies.
+    if state.home.reconnect_tasks.remove(&id).is_none() {
+        return;
+    }
     if !state.home.reconnect_task_runs(&network) {
         state.home.reconnecting.remove(&network);
     }
