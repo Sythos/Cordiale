@@ -12,14 +12,22 @@ Fonti:
 - **Riferimento funzionale (solo funzionalità, non architettura):**
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
-Valori dei server Grappa (2026-11-24, letti da fonti pubbliche, non da un server
-live): la release `v1.6.7` espone `protocol_version` 66 e `min_protocol_version` 1;
-`main` espone 67 e 1. Il passaggio 66→67 non cambia il JSON sul filo, quindi
-nessun nuovo gate. Cordiale now declares 68, with minimum 1: see the section
-"Protocol 68" at the end. Il gate di
-`meta.member_modes` resta dal protocollo 66. I valori nell'esempio di
-`/api/config` della guida Grappa sono esempi: vanno letti dal sorgente o
-dall'endpoint. Il controllo live (`e2e_live_server.rs`) verifica il minimo del
+**Version status (checked on 2026-11-27):**
+
+| Version | Protocol | Minimum | Source |
+| --- | --- | --- | --- |
+| Cordiale `main` | 68 | 1 | `crates/cordiale-core/src/protocol.rs` |
+| Cordiale release `v1.0.27` | 67 | 1 | The same file at the release merge commit `8064aeb` |
+| Grappa `main` | 68 | 1 | `lib/grappa/protocol.ex` on `main` |
+| Grappa release `v1.7.0` | 68 | 1 | `lib/grappa/protocol.ex` at the tag |
+
+- Cordiale declares `CLIENT_PROTOCOL_VERSION` as `client_proto`. The minimum is `MIN_SUPPORTED_PROTOCOL_VERSION`.
+- The check reads the source files only. It does not read a live server.
+- The example values for `/api/config` in the Grappa `CLIENT_PROTOCOL.md` are illustrative. Read the real values
+  from the source or from the endpoint.
+- The `meta.member_modes` gate starts at protocol 66. See the section "Protocol 68" for the latest change.
+
+Il controllo live (`e2e_live_server.rs`) verifica il minimo del
 server contro la dichiarazione del client e non richiede server >= client.
 Server controllati: nessun server live 66 o 67 era disponibile; l'interoperabilità
 live non è dimostrata. I test senza rete (`e2e_live_server.rs` e
@@ -36,9 +44,9 @@ Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
 (commit `c26c77bc`), la prima release che porta il protocollo 37:
 `protocol_version` 37, `min_protocol_version` 1 (letti dal sorgente server in
 `lib/grappa/protocol.ex` al tag; `GET /api/config` del server dell'autore
-risponde `version` 1.5.12 e protocollo 37). Cordiale dichiara
-`client_proto=50` dalla fetta 37 dell'ombrello 416 (§2; era 37). Le forme di riga di scrollback (`dm_with` opzionale),
-di `query_windows_list` (`network_id`, `target_nick`, `opened_at`) e di
+risponde `version` 1.5.12 e protocollo 37). Historical: Cordiale changed
+`client_proto` from 37 to 50 in slice 37 of umbrella 416 (§2). See "Version status" for the current value.
+Le forme di riga di scrollback (`dm_with` opzionale), di `query_windows_list` (`network_id`, `target_nick`, `opened_at`) e di
 `mentions_bundle` (`id` e `dm_with` opzionali) sono state controllate sul
 sorgente del tag; i flussi in una sessione reale restano da provare a mano.
 
@@ -2190,11 +2198,10 @@ formato sul filo: servono `GET /me`, `POST /session/networks` e `POST /networks/
   rete non compare si mostra un errore; il tentativo successivo rilegge prima di inviare un altro attach.
 - **Sessione:** l'invito ricorda token e server. Dopo logout, cambio account o cambio server nessun passo
   prosegue. Annullare la domanda lascia la rete collegata.
-- **Versioni controllate (2026-11-25):** Cordiale `main` dichiara il protocollo 67 e il minimo 1
-  (`protocol.rs`); resta così, nessun bump. I numeri seguenti vengono dalla issue e non sono stati riletti sul
-  sorgente di Grappa in questa sessione: Grappa `main` 67 e minimo 1, Grappa v1.6.7 66 e minimo 1, Cordiale
-  v1.0.26 65 e minimo 1. L'esempio di `/api/config` in `CLIENT_PROTOCOL.md` ha numeri d'esempio: la versione
-  vera si legge dal sorgente e da `/api/config`.
+- **Historical versions (2026-11-25, issue 962):** at that date, Cordiale `main` declared protocol 67 with
+  minimum 1, and issue 962 needed no change of this value. The issue gave these values: Grappa `main` 67, Grappa
+  v1.6.7 66, Cordiale v1.0.26 65, each with minimum 1. The session did not read the Grappa source. These values
+  are not current. See "Version status" at the start of this document.
 - **Non verificato:** le prove contro i server di prova 66 e 67 (`e2e_live_server.rs`) non sono state eseguite
   qui, perché non c'era un server raggiungibile. Il flusso è coperto da test puri in `invite_link.rs`.
 
