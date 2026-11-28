@@ -30,6 +30,7 @@
 //! UI thread; the worker reaches them through `upgrade_in_event_loop`.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use cordiale_core::bootstrap::BootstrapStage;
 use cordiale_core::persistence::{self, WindowState};
@@ -155,23 +156,39 @@ pub fn finish(ui: &AppWindow, completed: bool) {
 
 /// How often the startup looks for the end of the sign-in. The check reads
 /// a flag; the bar does not move with it.
-const SIGN_IN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const SIGN_IN_POLL: Duration = Duration::from_millis(100);
 
 thread_local! {
     static WATCH: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+}
+
+/// The longest time that `CORDIALE_SPLASH_HOLD_MS` can hold the splash.
+const MAX_SPLASH_HOLD: Duration = Duration::from_secs(60);
+
+/// The minimum time the splash stays open, from the value of
+/// `CORDIALE_SPLASH_HOLD_MS` in milliseconds. The Windows icon check of CI
+/// sets it to read the splash window. Without a valid value there is no hold.
+pub fn splash_hold(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::ZERO, |millis| {
+            Duration::from_millis(millis).min(MAX_SPLASH_HOLD)
+        })
 }
 
 /// Opens the main window when the sign-in at launch ends, with success or
 /// not. Where no sign-in runs, the window opens at the first check. Call it
 /// after the sign-in command is sent, with `connecting` already set.
 pub fn watch_sign_in(ui: &AppWindow) {
+    let hold = splash_hold(std::env::var("CORDIALE_SPLASH_HOLD_MS").ok().as_deref());
+    let started = Instant::now();
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
     timer.start(slint::TimerMode::Repeated, SIGN_IN_POLL, move || {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if ui.get_connecting() {
+        if ui.get_connecting() || started.elapsed() < hold {
             return;
         }
         finish(&ui, startup_completed(&ui.get_screen()));
