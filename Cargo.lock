@@ -5524,18 +5524,18 @@ dependencies = [
 
 [[package]]
 name = "rusty_h265"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c59ea74054b4b2e5e422111af892574b2af7e8e9fce116901c8f02edb636ad6b"
+checksum = "b8de949ee8df15fa006d8efa6bd0f3d9b502343d65a1ac4dd71d1160d9a0a075"
 dependencies = [
  "rusty_h265-accel",
 ]
 
 [[package]]
 name = "rusty_h265-accel"
-version = "0.7.1"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbf8d3e8071e4610acdf9677e96a37d3bb2d4603680898c887bb66c53f906c87"
+checksum = "154acec62374f77980c11b89fd7858ecea3a8d86d6225d9285ab8ef362ecdb57"
 
 [[package]]
 name = "rusty_vp9"
