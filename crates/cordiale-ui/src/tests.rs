@@ -384,6 +384,23 @@ fn splash_and_main_window_share_the_cordiale_icon() {
 }
 
 #[test]
+fn splash_hold_reads_milliseconds_with_a_limit() {
+    use std::time::Duration;
+    assert_eq!(startup::splash_hold(None), Duration::ZERO);
+    assert_eq!(startup::splash_hold(Some("")), Duration::ZERO);
+    assert_eq!(startup::splash_hold(Some("-1")), Duration::ZERO);
+    assert_eq!(startup::splash_hold(Some("soon")), Duration::ZERO);
+    assert_eq!(
+        startup::splash_hold(Some(" 1500 ")),
+        Duration::from_millis(1500)
+    );
+    assert_eq!(
+        startup::splash_hold(Some("3600000")),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
 fn splash_follows_the_startup_and_hands_off_once() {
     // A thread of its own: a thread takes one platform.
     std::thread::spawn(|| {
