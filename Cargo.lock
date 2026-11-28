@@ -5539,9 +5539,9 @@ checksum = "dbf8d3e8071e4610acdf9677e96a37d3bb2d4603680898c887bb66c53f906c87"
 
 [[package]]
 name = "rusty_vp9"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5c0fb525d16b81e73da6a384541f06a5ecfcdb661fb13fbcf453aff6ff9c465"
+checksum = "46033a42db101a0d141e42e0ce93aa526dbd3ac1648acc787f07b52365a16d8d"
 
 [[package]]
 name = "safe_arch"

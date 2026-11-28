@@ -64,7 +64,7 @@ symphonia = { version = "0.6", default-features = false, features = ["isomp4", "
 symphonia05 = { package = "symphonia", version = "0.5.5", default-features = false, features = ["isomp4", "aac"] }
 opus-decoder = "0.1"
 rusty_h265 = "0.7"
-rusty_vp9 = "0.2"
+rusty_vp9 = "0.3"
 # H.264, VP8 and AV1 (WebM video and AVIF stills), pure Rust with no assembly
 # and no C: the assembly paths of the AV1 and H.264 crates are left off.
 rusty_h264-decoder = { version = "0.17", default-features = false, features = ["std"] }
