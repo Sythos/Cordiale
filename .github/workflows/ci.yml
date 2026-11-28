@@ -113,6 +113,233 @@ jobs:
           name: Cargo.lock
           path: Cargo.lock
 
+  # Starts the real application on Windows and reads the title bar icon of the
+  # splash window and then of the main window. It checks a development build
+  # (no icon resource in the executable) and a packaged build (release build
+  # with the icon resource, installed with the NSIS installer). The release
+  # build is slow, so this job is not a required check.
+  window-icons-windows:
+    name: window-icons (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # An unoptimized build uses more stack than a release build. The check is
+      # about the icons, so the main thread gets 8 MiB, as on Linux. This build
+      # runs before the .ico exists, so it has no icon resource.
+      - name: Build the development binary
+        shell: pwsh
+        run: |
+          cargo rustc --package cordiale-ui --bin cordiale-ui -- -C link-arg=/STACK:8388608
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo rustc failed with exit code $LASTEXITCODE"
+          }
+
+      # The same icon, build and installer steps as packages.yml.
+      - name: Build and install the packaged binary
+        shell: pwsh
+        run: |
+          magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
+          if ($LASTEXITCODE -ne 0) {
+            throw "magick failed with exit code $LASTEXITCODE"
+          }
+          cargo build --release --package cordiale-ui
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
+          choco install nsis --no-progress --yes
+          if ($LASTEXITCODE -ne 0) {
+            throw "choco install failed with exit code $LASTEXITCODE"
+          }
+          $installer = "$env:RUNNER_TEMP\Cordiale_setup.exe"
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" "/DBIN_PATH=$PWD\target\release\cordiale-ui.exe" "/DOUT_FILE=$installer" "/DICON_PATH=$PWD\resources\branding\cordiale.ico" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
+          $setup = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) {
+            throw "the installer failed with exit code $($setup.ExitCode)"
+          }
+
+      - name: Check the splash and main window icons
+        shell: pwsh
+        env:
+          # The software renderer needs no GPU on the runner.
+          SLINT_BACKEND: winit-software
+          # Keeps the splash open long enough to read its icon.
+          CORDIALE_SPLASH_HOLD_MS: "10000"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -IgnoreWarnings -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+
+          public static class IconProbe {
+              delegate bool EnumProc(IntPtr window, IntPtr data);
+              [StructLayout(LayoutKind.Sequential)]
+              struct IconInfo { public int IsIcon; public int X; public int Y; public IntPtr Mask; public IntPtr Color; }
+              [StructLayout(LayoutKind.Sequential)]
+              struct Bitmap { public int Type; public int Width; public int Height; public int WidthBytes; public ushort Planes; public ushort BitsPixel; public IntPtr Bits; }
+              [StructLayout(LayoutKind.Sequential)]
+              struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+
+              [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr data);
+              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, [Out] char[] text, int max);
+              [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+              [DllImport("user32.dll")] public static extern IntPtr CopyIcon(IntPtr icon);
+              [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
+              [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr icon, out IconInfo info);
+              [DllImport("user32.dll")] static extern int FillRect(IntPtr dc, ref Rect rect, IntPtr brush);
+              [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, uint step, IntPtr brush, uint flags);
+              [DllImport("gdi32.dll")] static extern int GetObjectW(IntPtr handle, int size, out Bitmap bitmap);
+              [DllImport("gdi32.dll")] static extern IntPtr GetStockObject(int index);
+              [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr handle);
+
+              // The visible top-level windows of the process with the title "Cordiale".
+              public static IntPtr[] Windows(int process) {
+                  var found = new List<IntPtr>();
+                  EnumWindows((window, data) => {
+                      uint owner;
+                      GetWindowThreadProcessId(window, out owner);
+                      var text = new char[64];
+                      if (owner == (uint)process && IsWindowVisible(window)
+                          && new string(text, 0, GetWindowTextW(window, text, text.Length)) == "Cordiale") {
+                          found.Add(window);
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+                  return found.ToArray();
+              }
+
+              // WM_GETICON with ICON_SMALL: the icon of the title bar.
+              public static IntPtr TitleBarIcon(IntPtr window) {
+                  IntPtr icon;
+                  if (SendMessageTimeoutW(window, 0x7F, IntPtr.Zero, IntPtr.Zero, 2, 5000, out icon) == IntPtr.Zero) {
+                      throw new InvalidOperationException("the window did not answer WM_GETICON");
+                  }
+                  return icon;
+              }
+
+              public static int[] Size(IntPtr icon) {
+                  IconInfo info;
+                  if (!GetIconInfo(icon, out info)) {
+                      throw new InvalidOperationException("GetIconInfo failed");
+                  }
+                  Bitmap bitmap;
+                  GetObjectW(info.Color, Marshal.SizeOf(typeof(Bitmap)), out bitmap);
+                  DeleteObject(info.Color);
+                  DeleteObject(info.Mask);
+                  return new[] { bitmap.Width, bitmap.Height };
+              }
+
+              // Draws the icon on a white background.
+              public static void Draw(IntPtr dc, IntPtr icon, int width, int height) {
+                  var rect = new Rect { Right = width, Bottom = height };
+                  FillRect(dc, ref rect, GetStockObject(0));
+                  if (!DrawIconEx(dc, 0, 0, icon, width, height, 0, IntPtr.Zero, 3)) {
+                      throw new InvalidOperationException("DrawIconEx failed");
+                  }
+              }
+          }
+          '@
+
+          # Scales an image on a white background.
+          function Resize-Image($image, [int]$width, [int]$height) {
+            $result = [System.Drawing.Bitmap]::new($width, $height)
+            $graphics = [System.Drawing.Graphics]::FromImage($result)
+            $graphics.Clear([System.Drawing.Color]::White)
+            $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $graphics.DrawImage($image, 0, 0, $width, $height)
+            $graphics.Dispose()
+            return $result
+          }
+
+          # The mean difference of the color channels, from 0 to 255.
+          function Measure-Difference($first, $second) {
+            $a = Resize-Image $first 32 32
+            $b = Resize-Image $second 32 32
+            $total = 0
+            foreach ($y in 0..31) {
+              foreach ($x in 0..31) {
+                $p = $a.GetPixel($x, $y)
+                $q = $b.GetPixel($x, $y)
+                $total += [Math]::Abs($p.R - $q.R) + [Math]::Abs($p.G - $q.G) + [Math]::Abs($p.B - $q.B)
+              }
+            }
+            return $total / (32 * 32 * 3)
+          }
+
+          # Waits for a visible Cordiale window other than $previous.
+          function Wait-Window($process, $previous) {
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($watch.Elapsed.TotalSeconds -lt 60) {
+              if ($process.HasExited) {
+                throw "the application ended with exit code $($process.ExitCode)"
+              }
+              foreach ($window in [IconProbe]::Windows($process.Id)) {
+                if ($window -ne $previous) { return $window }
+              }
+              Start-Sleep -Milliseconds 1
+            }
+            throw "no new Cordiale window appeared"
+          }
+
+          function Test-Icon($window, [string]$name) {
+            $handle = [IconProbe]::TitleBarIcon($window)
+            if ($handle -eq [IntPtr]::Zero) {
+              throw "${name}: the window has no title bar icon"
+            }
+            $icon = [IconProbe]::CopyIcon($handle)
+            $size = [IconProbe]::Size($icon)
+            $actual = [System.Drawing.Bitmap]::new($size[0], $size[1])
+            $graphics = [System.Drawing.Graphics]::FromImage($actual)
+            $dc = $graphics.GetHdc()
+            [IconProbe]::Draw($dc, $icon, $size[0], $size[1])
+            $graphics.ReleaseHdc($dc)
+            $graphics.Dispose()
+            [void][IconProbe]::DestroyIcon($icon)
+            $source = [System.Drawing.Image]::FromFile("$PWD\resources\branding\cordiale_icona_256.png")
+            $expected = Resize-Image $source $size[0] $size[1]
+            $difference = Measure-Difference $actual $expected
+            Write-Host "${name}: icon $($size[0])x$($size[1]), mean difference $difference"
+            if ($difference -gt 20) {
+              throw "${name}: the title bar icon is not the Cordiale icon"
+            }
+          }
+
+          $builds = [ordered]@{
+            'development build' = "$PWD\target\debug\cordiale-ui.exe"
+            'packaged build' = "$env:ProgramFiles\Cordiale\cordiale-ui.exe"
+          }
+          foreach ($build in $builds.GetEnumerator()) {
+            $process = Start-Process -FilePath $build.Value -PassThru
+            try {
+              # The first visible window is the splash.
+              $splash = Wait-Window $process ([IntPtr]::Zero)
+              Test-Icon $splash "$($build.Key), splash"
+              # The next window is the main window, after the handoff.
+              $main = Wait-Window $process $splash
+              Test-Icon $main "$($build.Key), main window"
+            } finally {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              $process.WaitForExit()
+            }
+          }
+
   # The ctap-hid feature (USB security keys on Linux and macOS) is off in the
   # default build, so the verify job never compiles it. It builds hidapi's C
   # code. macOS runners are slower than Linux's, same note as in verify.
