@@ -364,6 +364,25 @@ fn startup_opens_on_the_splash_and_hands_off_by_language() {
     assert!(std::fs::metadata(logo).unwrap().len() > 0);
 }
 
+/// Rust cannot read the icon of a window, so the test reads the definitions:
+/// the splash and the main window use the same Cordiale icon.
+#[test]
+fn splash_and_main_window_share_the_cordiale_icon() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let icon = r#"icon: @image-url("../../../resources/branding/cordiale_icona_256.png");"#;
+    for window in ["SplashWindow", "AppWindow"] {
+        let definition = slint
+            .split(&format!("export component {window} inherits Window {{"))
+            .nth(1)
+            .and_then(|rest| rest.split("export component ").next())
+            .expect("window definition");
+        assert!(
+            definition.lines().any(|line| line.trim() == icon),
+            "{window} must set the Cordiale icon"
+        );
+    }
+}
+
 #[test]
 fn splash_follows_the_startup_and_hands_off_once() {
     // A thread of its own: a thread takes one platform.

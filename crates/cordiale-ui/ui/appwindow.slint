@@ -1502,6 +1502,9 @@ component StartupProgress inherits VerticalLayout {
 // progress bar and the status text. The main window opens when it ends.
 export component SplashWindow inherits Window {
     title: "Cordiale";
+    // The same icon as the main window. Slint applies it before the window
+    // appears, and `EmbedFiles` puts the image in every build.
+    icon: @image-url("../../../resources/branding/cordiale_icona_256.png");
     preferred-width: 340px;
     min-width: 340px;
     max-width: 340px;
